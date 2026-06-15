@@ -6,11 +6,11 @@ A little macOS app that listens to **any sound your Mac is playing — from any 
   <img src="docs/screenshot.png" alt="Live Translation overlay — original on the left, translation on the right" width="700">
 </p>
 
-That's the whole idea: it doesn't care *where* the audio comes from. A YouTube video in your browser, a Zoom call, VLC, a podcast, a Twitch stream, a foreign news livestream, a game — if your Mac can play it through its speakers, this can caption it and translate it into a language you actually read. Real-time subtitles for the entire machine, running **entirely on your machine**. Nothing gets uploaded anywhere.
+That's the whole idea: it doesn't care *where* the audio comes from. A YouTube video in your browser, a Zoom call, VLC, a podcast, a Twitch stream, a foreign news livestream, a game — if your Mac can play it through its speakers, this can transcribe it and translate it into a language you actually read. Real-time transcription + translation for the entire machine, running **entirely on your machine**. Nothing gets uploaded anywhere.
 
-I built it to watch foreign news (Spanish/Catalan, in my case) without waiting for anyone to add subtitles. It grew a bunch of knobs from there.
+I built it for the moments when audio is useful but the language is in the way: foreign news, talks, calls, streams, videos, podcasts, or anything else your Mac can play. It shows both what was said and what it means in your language. It grew a bunch of knobs from there.
 
-It's a hack. It works surprisingly well. It also occasionally hallucinates the word "gracias" out of thin air. Read on.
+It's a hack. It works surprisingly well. Read on.
 
 ## TLDR
 
@@ -25,10 +25,10 @@ Everything is local: [MLX](https://github.com/ml-explore/mlx) Whisper for transc
 
 Honestly I built it for me, but if any of these is you, it'll probably help:
 
-- You watch **foreign-language media** — news, YouTube, documentaries, films, Twitch — and you're tired of waiting for (or doing without) subtitles.
+- You watch **foreign-language media** — news, YouTube, documentaries, films, Twitch — and want live transcription and translation instead of waiting for subtitles.
 - You're **learning a language** and want to see the original *and* a translation side by side, live, on real native speech instead of textbook audio.
 - You sit in **calls / meetings / webinars** in a language you only half-speak.
-- You want **captions for accessibility** on audio that has none.
+- You want **captions and translation for accessibility** on audio that has none.
 - You just want to know **what that video is actually saying** without copy-pasting anything anywhere.
 
 And a hard requirement for some people: it's **fully offline and private**. The audio never leaves your Mac. No API key, no account, no cloud. That matters if you're translating a confidential call or you just don't want your media diet logged somewhere.
