@@ -64,6 +64,8 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 brew bundle --file=Brewfile      # installs BlackHole + ffmpeg + ollama
 ```
 
+If dependency resolution changes in the future and the install starts breaking, use `requirements.lock.txt` for the exact pinned environment I tested with.
+
 ### 2. Capturing system audio — why you need BlackHole
 
 macOS, on purpose, won't let an app just grab "whatever is coming out of the speakers." A microphone, sure. The system output, no. So to feed your Mac's audio into this app we need a **virtual audio device** that loopbacks output → input. That's [**BlackHole**](https://github.com/ExistentialAudio/BlackHole) — a free, open-source virtual audio driver. The `2ch` variant is what we use.
@@ -220,7 +222,8 @@ live_translate_overlay.py   the whole thing (capture, VAD, ASR, translate, overl
 LiveTranslate.app           double-clickable bundle (just launches the script via your venv)
 install-app.sh              put the .app in /Applications, detached from the project folder
 setup.sh / Brewfile         install everything
-requirements*.txt           python deps
+requirements.txt            direct deps for normal install
+requirements.lock.txt       full pinned environment for exact reproduction
 ```
 
 ## License / spirit
