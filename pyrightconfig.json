@@ -1,0 +1,7 @@
+{
+  "//": "pyobjc (AppKit, Foundation, objc, Quartz) ships incomplete type stubs, so",
+  "//2": "the type checker can't resolve framework symbols like NSView/NSApp. These",
+  "//3": "are false positives — silence just the pyobjc-related rules, keep the rest.",
+  "reportAttributeAccessIssue": false,
+  "reportMissingModuleSource": false
+}

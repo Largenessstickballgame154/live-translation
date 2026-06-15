@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# Runtime / logs (generated at run time)
+*.log
+*.pid
+live_translate_overlay.boot.log
+
+# Downloaded / quantized models (large, fetched on demand)
+models/
+
+# macOS
+.DS_Store
+.AppleDouble
+Icon?
+
+# Temp audio
+live_translate_*.wav
+live_stream_*.wav
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp

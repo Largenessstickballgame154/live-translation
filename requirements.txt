@@ -1,0 +1,28 @@
+# Live Translate overlay — dependencies
+# macOS (Apple Silicon) + Python 3.12+. Install into a venv:
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+
+# --- On-device LLM translation (MLX) ---
+mlx==0.31.2
+mlx-lm==0.31.3
+mlx-metal==0.31.2            # Apple Silicon Metal backend for mlx
+
+# --- Speech-to-text (Whisper on MLX) ---
+mlx-whisper==0.4.3
+
+# --- Voice activity detection (silence/non-speech filtering) ---
+silero-vad==6.2.1
+torch==2.12.0
+torchaudio==2.11.0          # used to resample audio to 16 kHz for VAD
+
+# --- Audio capture / IO ---
+sounddevice==0.5.5          # system audio input (e.g. BlackHole loopback)
+soundfile==0.14.0           # write WAV chunks for Whisper
+numpy==2.4.6
+
+# --- macOS glass overlay UI ---
+pyobjc-framework-Cocoa==12.2  # pulls in pyobjc-core
+
+# --- Tokenizers / model loading (used by mlx-lm & mlx-whisper) ---
+transformers==5.12.0
+tokenizers==0.22.2
