@@ -24,6 +24,15 @@ Icon?
 # Temp audio
 live_translate_*.wav
 live_stream_*.wav
+recording_*.wav
+recording_*.txt
+recording_*.srt
+recording_*.json
+
+# Coverage / reports
+.coverage
+htmlcov/
+coverage.xml
 
 # Editor / IDE
 .vscode/

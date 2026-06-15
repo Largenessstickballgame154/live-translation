@@ -28,7 +28,6 @@ Multi-Output Device = твои наушники/колонки + BlackHole 2ch.
 """
 
 import argparse
-import json
 import os
 import queue
 import re
@@ -37,8 +36,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import cast
 
@@ -46,6 +43,22 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+from live_translation.text_pipeline import (
+    LANG_MENU,
+    WAITING_ORIGINAL,
+    WAITING_TRANSLATION,
+    language_label,
+    last_word_end_seconds,
+    merge_overlap_text,
+    merge_partial_buffer,
+    punctuated_context,
+    sentence_case_text,
+    strip_hallucinations,
+    take_blocks_for_translation,
+    take_confirmed_blocks_for_translation,
+    take_endpoint_blocks,
+)
+from live_translation.translators import LanguageSettings, MLXTranslator, OllamaTranslator
 
 WHISPER_MODELS = {
     "base": "mlx-community/whisper-base-mlx",
@@ -53,379 +66,6 @@ WHISPER_MODELS = {
     "medium": "mlx-community/whisper-medium-mlx",
     "large-v3": "mlx-community/whisper-large-v3-mlx",
 }
-
-LANG_NAMES = {
-    "auto": "the target language",
-    "de": "German",
-    "en": "English",
-    "es": "Spanish",
-    "fr": "French",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "ru": "Russian",
-    "uk": "Ukrainian",
-    "zh": "Chinese",
-}
-
-LANG_MENU = [
-    ("auto", "Auto"),
-    ("en", "English"),
-    ("ru", "Russian"),
-    ("es", "Spanish"),
-    ("de", "German"),
-    ("fr", "French"),
-    ("it", "Italian"),
-    ("pt", "Portuguese"),
-    ("uk", "Ukrainian"),
-    ("zh", "Chinese"),
-]
-
-WAITING_ORIGINAL = "Waiting for speech…"
-WAITING_TRANSLATION = {
-    "en": "Waiting for translation…",
-    "ru": "Жду перевод…",
-    "es": "Esperando traducción…",
-    "de": "Warte auf Übersetzung…",
-    "fr": "En attente de traduction…",
-    "it": "In attesa di traduzione…",
-    "pt": "Aguardando tradução…",
-    "uk": "Чекаю на переклад…",
-    "zh": "等待翻译…",
-}
-
-
-def language_name(code):
-    return LANG_NAMES.get((code or "").lower(), code or "the target language")
-
-
-def language_label(code):
-    for item_code, label in LANG_MENU:
-        if item_code == code:
-            return label
-    return code or "Auto"
-
-
-# Extra names for languages Whisper may auto-detect (beyond the UI menu), used to fill
-# TranslateGemma's required "{LANG} ({code})" prompt slots.
-_TG_EXTRA_NAMES = {
-    "ca": "Catalan", "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "nl": "Dutch",
-    "pl": "Polish", "tr": "Turkish", "sv": "Swedish", "cs": "Czech", "el": "Greek",
-    "ro": "Romanian", "hu": "Hungarian", "fi": "Finnish", "da": "Danish", "no": "Norwegian",
-    "he": "Hebrew", "hi": "Hindi", "id": "Indonesian", "vi": "Vietnamese", "th": "Thai",
-    "gl": "Galician", "eu": "Basque",
-}
-
-
-def _tg_name(code):
-    code = (code or "").lower()
-    return LANG_NAMES.get(code) or _TG_EXTRA_NAMES.get(code) or (code.upper() if code else "the language")
-
-
-def _tg_code(code):
-    return {"zh": "zh-Hans"}.get((code or "").lower(), (code or "").lower())
-
-
-def translategemma_prompt(src_code, tgt_code, text):
-    """Official TranslateGemma prompt (note: two blank lines before the text)."""
-    sname, scode = _tg_name(src_code), _tg_code(src_code)
-    tname, tcode = _tg_name(tgt_code), _tg_code(tgt_code)
-    return (
-        f"You are a professional {sname} ({scode}) to {tname} ({tcode}) translator. "
-        f"Your goal is to accurately convey the meaning and nuances of the original {sname} "
-        f"text while adhering to {tname} grammar, vocabulary, and cultural sensitivities.\n"
-        f"Produce only the {tname} translation, without any additional explanations or "
-        f"commentary. Please translate the following {sname} text into {tname}:\n\n\n{text}\n"
-    )
-
-
-# Phrases Whisper hallucinates on silence/music/chunk-boundaries (its training data was
-# full of subtitle boilerplate). Stripped from the transcript as standalone tokens.
-HALLUCINATION_PATTERNS = [
-    r"¡?\s*gracias\s*!?",
-    r"muchas\s+gracias",
-    r"subt[ií]tulos?(?:\s+(?:realizados?|por)[^.\n]*)?",
-    r"amara\.org",
-    r"thanks?\s+for\s+watching",
-    r"please\s+subscribe",
-    r"subtitles?\s+by[^.\n]*",
-    r"спасибо\s+за\s+просмотр",
-    r"продолжение\s+следует",
-]
-_HALLUCINATION_RE = re.compile(
-    r"(?<![\w¡])(?:" + "|".join(HALLUCINATION_PATTERNS) + r")(?![\w])",
-    re.IGNORECASE,
-)
-
-
-def strip_hallucinations(text):
-    """Remove standalone Whisper boilerplate hallucinations (e.g. a stray "Gracias")."""
-    cleaned = _HALLUCINATION_RE.sub(" ", text)
-    cleaned = re.sub(r"\s+([,.;:!?…])", r"\1", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned.strip(" ,.;:!-—")
-
-
-def strip_llm_noise(text):
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"(?is)^\s*thinking process:.*?(final answer:|answer:)", "", text)
-    text = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
-    text = re.sub(r"\s*```$", "", text.strip())
-    return text.strip().strip('"')
-
-
-def sentence_case_text(text):
-    chars = list(text)
-    should_capitalize = True
-    for idx, char in enumerate(chars):
-        if not char.isalpha():
-            if char in ".!?":
-                should_capitalize = True
-            continue
-        if should_capitalize:
-            chars[idx] = char.upper()
-            should_capitalize = False
-        else:
-            should_capitalize = False
-    return "".join(chars)
-
-
-def _word_matches(text):
-    return list(re.finditer(r"[\w'’-]+", text, flags=re.UNICODE))
-
-
-def _normalized_words(text):
-    return [m.group(0).casefold().strip("'’-") for m in _word_matches(text)]
-
-
-def _drop_prefix_words(text, word_count):
-    end = 0
-    for idx, match in enumerate(_word_matches(text), 1):
-        if idx == word_count:
-            end = match.end()
-            break
-    return text[end:].lstrip(" ,.;:!?…-—")
-
-
-def _sentence_end_matches(text):
-    return list(re.finditer(r"(?<!\.)[.!?](?!\.)(?:[\"')\]]+)?(?=\s|$)|…(?:[\"')\]]+)?(?=\s|$)", text))
-
-
-def merge_overlap_text(previous_tail, incoming, min_overlap=12, max_overlap=120):
-    incoming = re.sub(r"\s+", " ", incoming).strip()
-    previous_tail = re.sub(r"\s+", " ", previous_tail).strip()
-    if not previous_tail or not incoming:
-        return incoming
-
-    prev_words = _normalized_words(previous_tail)
-    incoming_words = _normalized_words(incoming)
-    if incoming_words and " ".join(incoming_words) in " ".join(prev_words):
-        return ""
-
-    max_words = min(len(prev_words), len(incoming_words), 28)
-    for size in range(max_words, 2, -1):
-        if prev_words[-size:] == incoming_words[:size]:
-            return _drop_prefix_words(incoming, size)
-    if prev_words and incoming_words:
-        if prev_words[-1] == incoming_words[0] and len(incoming_words[0]) >= 5:
-            return _drop_prefix_words(incoming, 1)
-
-    prev_lower = previous_tail.lower()
-    incoming_lower = incoming.lower()
-    max_len = min(len(prev_lower), len(incoming_lower), max_overlap)
-    for size in range(max_len, min_overlap - 1, -1):
-        if prev_lower[-size:] == incoming_lower[:size]:
-            return incoming[size:].lstrip()
-    return incoming
-
-
-def merge_partial_buffer(buffer, incoming):
-    buffer = re.sub(r"\s+", " ", buffer).strip()
-    incoming = re.sub(r"\s+", " ", incoming).strip()
-    if not buffer:
-        return incoming
-    if not incoming:
-        return buffer
-
-    buffer_words = _normalized_words(buffer)
-    incoming_words = _normalized_words(incoming)
-    if len(incoming_words) >= 8:
-        window = " ".join(incoming_words[: min(10, len(incoming_words))])
-        joined_buffer = " ".join(buffer_words)
-        if window and window in joined_buffer:
-            prefix = joined_buffer.split(window, 1)[0].split()
-            keep_words = len(prefix)
-            matches = _word_matches(buffer)
-            cut = matches[keep_words].start() if keep_words < len(matches) else len(buffer)
-            return f"{buffer[:cut].strip()} {incoming}".strip()
-
-    merged = merge_overlap_text(buffer[-500:], incoming, min_overlap=8, max_overlap=160)
-    if not merged:
-        return buffer
-    return f"{buffer} {merged}".strip()
-
-
-def split_complete_sentences(buffer, min_sentence_chars):
-    text = re.sub(r"\s+", " ", buffer).strip()
-    if not text:
-        return [], ""
-
-    matches = _sentence_end_matches(text)
-    if not matches:
-        return [], text
-
-    cut = matches[-1].end()
-    complete = text[:cut].strip()
-    rest = text[cut:].strip()
-    sentences = []
-    start = 0
-    for match in _sentence_end_matches(complete):
-        sentence = complete[start : match.end()].strip()
-        start = match.end()
-        if len(sentence) >= min_sentence_chars:
-            sentences.append(sentence)
-        elif sentences:
-            sentences[-1] = f"{sentences[-1]} {sentence}".strip()
-        elif sentence:
-            sentences.append(sentence)
-    return sentences, rest
-
-
-def take_sentences_for_translation(buffer, min_sentence_chars, max_sentences, force=False):
-    sentences, rest = split_complete_sentences(buffer, min_sentence_chars)
-    if force and not sentences and buffer.strip():
-        return [buffer.strip()], ""
-    if not sentences:
-        return [], rest
-    selected = sentences[:max_sentences]
-    remaining_sentences = sentences[max_sentences:]
-    remaining = " ".join(remaining_sentences + ([rest] if rest else [])).strip()
-    return selected, remaining
-
-
-def take_blocks_for_translation(buffer, min_chars, max_chars, max_sentences, force=False):
-    sentences, rest = split_complete_sentences(buffer, min_sentence_chars=1)
-    if force and not sentences:
-        return [], buffer.strip()
-
-    blocks = []
-    current = []
-    current_len = 0
-    for sentence in sentences:
-        sentence_len = len(sentence)
-        should_flush = (
-            current
-            and (
-                current_len >= min_chars
-                or len(current) >= max_sentences
-                or current_len + sentence_len + 1 > max_chars
-            )
-        )
-        if should_flush:
-            blocks.append(" ".join(current).strip())
-            current = []
-            current_len = 0
-        current.append(sentence)
-        current_len += sentence_len + 1
-
-    if current and (current_len >= min_chars or force):
-        blocks.append(" ".join(current).strip())
-        current = []
-
-    remaining = " ".join(current + ([rest] if rest else [])).strip()
-    return blocks, remaining
-
-
-_SOFT_PUNCT = re.compile(r"[,;:—–](?=\s)")
-
-
-def split_soft_boundaries(text, min_chars, max_chars):
-    """Split a punctuation-less run into readable paragraphs.
-
-    When Whisper drifts and stops emitting sentence punctuation, the buffer would
-    otherwise be dumped as one long wall. Instead, cut it at the nearest clause
-    boundary (comma/semicolon/colon/dash) — or, failing that, at a word boundary —
-    around a comfortable target length, never mid-word. Language-agnostic: relies
-    only on commas/spaces, not on a per-language word list."""
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-    target = min(max_chars, max(min_chars * 2, 200))
-    blocks = []
-    while len(text) > target:
-        cut = None
-        for m in _SOFT_PUNCT.finditer(text[: target + 1]):
-            if m.end() >= min_chars:
-                cut = m.end()  # keep the last clause boundary within the window
-        if cut is None:
-            sp = text.rfind(" ", min_chars, target + 1)
-            cut = sp if sp >= min_chars else target
-        blocks.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if text:
-        blocks.append(text)
-    return blocks
-
-
-def take_endpoint_blocks(buffer, min_chars, max_chars, min_words):
-    blocks, remaining = take_blocks_for_translation(
-        buffer,
-        min_chars=min_chars,
-        max_chars=max_chars,
-        max_sentences=100,
-        force=True,
-    )
-    if blocks:
-        return blocks, remaining
-
-    text = re.sub(r"\s+", " ", buffer).strip()
-    if len(text) >= min_chars or len(_normalized_words(text)) >= min_words:
-        # An endpoint is a real speech pause, so the whole utterance is complete even
-        # without trailing punctuation. But Whisper sometimes drops punctuation for a
-        # long stretch — emit that as several readable paragraphs (clause/word cuts)
-        # rather than one wall.
-        return split_soft_boundaries(text, min_chars, max_chars), ""
-    return [], text
-
-
-def punctuated_context(text, max_unpunctuated_tail=80):
-    """Recent text to feed Whisper as initial_prompt — but only while it's still
-    well-punctuated right up to the end.
-
-    initial_prompt biases the next chunk. Feeding back a punctuation-less run makes
-    Whisper keep omitting punctuation (a self-reinforcing drift). It's not enough to
-    check for *any* period: an old period from an earlier block keeps the gate open
-    while a fresh punctuation-less run is already trailing it, so the drift persists
-    until that old period scrolls out of the window (the "fixes itself eventually"
-    lag). So we also require the tail after the last sentence end to be short — once
-    a long unpunctuated run is in progress, drop the context immediately and let the
-    next chunk re-introduce sentence boundaries."""
-    text = re.sub(r"\s+", " ", text).strip()[-240:]
-    if not text:
-        return None
-    matches = _sentence_end_matches(text)
-    if not matches:
-        return None
-    tail = text[matches[-1].end():].strip()
-    if len(tail) > max_unpunctuated_tail:
-        return None
-    return text
-
-
-def strip_to_recent_text(text, max_chars):
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_chars:
-        return text
-    return text[-max_chars:].lstrip()
-
-
-def last_word_end_seconds(result):
-    last_end = None
-    for segment in result.get("segments", []):
-        for word in segment.get("words", []) or []:
-            end = word.get("end")
-            if end is not None:
-                last_end = float(end)
-    return last_end
 
 
 def find_blackhole():
@@ -441,184 +81,10 @@ def list_devices():
     print("\nИщи входное устройство BlackHole. Его номер можно передать через --device N.")
 
 
-class LanguageSettings:
-    def __init__(self, source, target):
-        self._lock = threading.Lock()
-        self._source = source
-        self._target = target
-
-    def get(self):
-        with self._lock:
-            return self._source, self._target
-
-    def set_source(self, source):
-        with self._lock:
-            self._source = source
-
-    def set_target(self, target):
-        with self._lock:
-            self._target = target
-
-
-class OllamaTranslator:
-    def __init__(self, model, target, url, max_tokens, temperature, reasoning, source="auto"):
-        self.model = model
-        self.target = target
-        self.source = source
-        self.url = url.rstrip("/") + "/api/generate"
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.reasoning = reasoning
-        self.translategemma = "translategemma" in model.lower() or "translate-gemma" in model.lower()
-
-    def set_target(self, target):
-        self.target = target
-
-    def set_source(self, source):
-        self.source = source
-
-    def translate(self, text):
-        target = language_name(self.target)
-        if self.translategemma and self.source and self.source != "auto":
-            # Use TranslateGemma's required prompt template for best quality.
-            prompt = translategemma_prompt(self.source, self.target, text)
-        else:
-            think_prefix = "" if self.reasoning else "/no_think\n"
-            prompt = (
-                f"{think_prefix}Translate this live speech transcript into {target}.\n"
-                "Return only the translation. Keep names, numbers, and technical terms accurate. "
-                "Fix obvious speech-recognition glitches only when the meaning is clear.\n\n"
-                f"Transcript:\n{text}"
-            )
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "keep_alive": "30m",
-            "options": {
-                "temperature": self.temperature,
-                "num_predict": self.max_tokens,
-                "top_p": 0.9,
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Ollama не отвечает. Запусти `ollama serve` и скачай модель: "
-                f"`ollama pull {self.model}`."
-            ) from exc
-        return strip_llm_noise(body.get("response", ""))
-
-
-class MLXTranslator:
-    def __init__(self, model_repo, target, max_tokens, temperature, reasoning=False):
-        # NB: do NOT import mlx_lm or load the model here. mlx_lm.generate creates a
-        # thread-local GPU stream at import time, and the model must be evaluated on
-        # the same thread that owns that stream. __init__ runs on the main thread, but
-        # translate() runs in the transcribe/translate worker thread. So we defer both
-        # the import and the load to the first translate() call (worker thread),
-        # otherwise long prompts crash with "There is no Stream(gpu, 1) in current thread".
-        self.model_repo = model_repo
-        self.target = target
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.reasoning = reasoning
-        self.model = None
-        self.tokenizer = None
-        self.generate = None
-        self.make_sampler = None
-        self._load_lock = threading.Lock()
-
-    def _ensure_loaded(self):
-        if self.model is not None:
-            return
-        with self._load_lock:
-            if self.model is not None:
-                return
-            try:
-                from mlx_lm import generate, load
-                from mlx_lm.sample_utils import make_sampler
-            except ImportError as exc:
-                raise RuntimeError("Для --translator mlx установи `pip install mlx-lm`.") from exc
-            self.generate = generate
-            self.make_sampler = make_sampler
-            loaded = load(self.model_repo)
-            self.model, self.tokenizer = loaded[0], loaded[1]
-
-    def set_target(self, target):
-        self.target = target
-
-    def set_source(self, source):
-        pass  # Qwen prompt doesn't need an explicit source language
-
-    def translate(self, text):
-        self._ensure_loaded()
-        # _ensure_loaded() guarantees these are populated; bind to locals so the
-        # invariant is explicit (and the optional-None warnings go away).
-        model, tokenizer = self.model, self.tokenizer
-        generate, make_sampler = self.generate, self.make_sampler
-        assert (
-            model is not None
-            and tokenizer is not None
-            and generate is not None
-            and make_sampler is not None
-        ), "MLX translator not loaded"
-        target = language_name(self.target)
-        think_prefix = "" if self.reasoning else "/no_think\n"
-        system = (
-            "You are a low-latency translation engine. Return only the translation. "
-            "Do not explain. Do not include alternatives."
-        )
-        user = (
-            f"{think_prefix}Translate this live speech transcript into {target}. "
-            "Keep names, numbers, and technical terms accurate. "
-            "Fix obvious speech-recognition glitches only when the meaning is clear.\n\n"
-            f"Transcript:\n{text}"
-        )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        if hasattr(tokenizer, "apply_chat_template"):
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=self.reasoning,
-                )
-            except TypeError:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-        else:
-            prompt = f"{system}\n\nUser:\n{user}\n\nAssistant:\n"
-
-        out = generate(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=self.max_tokens,
-            sampler=make_sampler(temp=self.temperature, top_p=0.9),
-            verbose=False,
-        )
-        return strip_llm_noise(out)
-
-
 class ConsoleOverlay:
-    def __init__(self, stop_event):
+    def __init__(self, stop_event, show_partial=False):
         self.stop_event = stop_event
+        self.show_partial = show_partial
 
     def post_pair(self, source, translated, pause_ms=0):
         print("\n--- transcript ---")
@@ -631,7 +97,7 @@ class ConsoleOverlay:
             print(f"lag: {lag_chunks} chunks", flush=True)
 
     def post_partial(self, source):
-        if source:
+        if self.show_partial and source:
             print("\n--- partial ---")
             print(source, flush=True)
 
@@ -712,7 +178,7 @@ def _glass_pdf_view_class():
 
 
 class GlassOverlay:
-    def __init__(self, stop_event, settings, title, width, height, opacity):
+    def __init__(self, stop_event, settings, title, width, height, opacity, show_partial=False):
         try:
             from Cocoa import (
                 NSApp,
@@ -723,23 +189,23 @@ class GlassOverlay:
                 NSColor,
                 NSFloatingWindowLevel,
                 NSFont,
+                NSFontAttributeName,
+                NSForegroundColorAttributeName,
                 NSMakeRange,
                 NSMakeRect,
                 NSMakeSize,
+                NSMomentaryPushInButton,
                 NSMutableAttributedString,
+                NSNormalWindowLevel,
                 NSObject,
+                NSOffState,
+                NSOnState,
                 NSPopUpButton,
                 NSScrollView,
                 NSSlider,
+                NSSwitchButton,
                 NSTextField,
                 NSTextView,
-                NSFontAttributeName,
-                NSForegroundColorAttributeName,
-                NSMomentaryPushInButton,
-                NSNormalWindowLevel,
-                NSOffState,
-                NSOnState,
-                NSSwitchButton,
                 NSView,
                 NSViewHeightSizable,
                 NSViewWidthSizable,
@@ -785,6 +251,7 @@ class GlassOverlay:
         self.settings = settings
         self.original_text = ""
         self.partial_text = ""
+        self.show_partial = show_partial
         self.translated_text = ""
         self.original_blocks = []
         self.translation_blocks = []
@@ -1201,7 +668,7 @@ class GlassOverlay:
     def _set_trash_icon(self, button):
         # Native vector trash glyph (SF Symbol), tinted white to match the toolbar.
         try:
-            from AppKit import NSImageOnly, NSImage
+            from AppKit import NSImage, NSImageOnly
 
             img = NSImage.imageWithSystemSymbolName_accessibilityDescription_("trash", "Clear")
             if img is not None:
@@ -1487,6 +954,8 @@ class GlassOverlay:
         self.AppHelper.callAfter(self._append_pair, source, translated, pause_ms)
 
     def post_partial(self, source):
+        if not self.show_partial:
+            return
         self.AppHelper.callAfter(self._set_partial, source)
 
     def post_status(self, lag_chunks):
@@ -1521,10 +990,7 @@ class GlassOverlay:
 
     def _set_partial(self, source):
         try:
-            partial = source.strip()
-            if len(partial) > 700:
-                partial = partial[-700:].lstrip()
-            self.partial_text = partial
+            self.partial_text = source.strip()
             self._render_original()
         except Exception as exc:
             print(f"[ui] _set_partial: {exc!r}", file=sys.stderr)
@@ -1662,7 +1128,7 @@ def _to_mono_16k(audio, samplerate):
     return tensor
 
 
-def vad_analyze(audio, samplerate, vad_model, get_speech_timestamps, min_keep_frames, min_speech_ms=250):
+def vad_analyze(audio, samplerate, vad_model, get_speech_timestamps, min_keep_frames, min_speech_ms=250.0):
     """Analyze a chunk with Silero VAD. Returns (has_speech, cut):
     - has_speech: whether enough *real* speech was detected. We require the total speech
       duration to reach min_speech_ms — a stray blip/noise that Silero marks as a tiny
@@ -1915,6 +1381,16 @@ def chunk_worker(
                 trailing_silence_ms += len(block) / samplerate * 1000.0
                 if trailing_silence_ms >= endpointing_ms and not endpoint_sent:
                     endpoint_sent = True
+                    put_wait(
+                        chunk_q,
+                        {
+                            "audio": None,
+                            "endpoint": True,
+                            "trailing_silence_ms": trailing_silence_ms,
+                        },
+                        stop_event,
+                    )
+                    overlay.post_status(chunk_q.qsize())
 
             if channel_count is None:
                 channel_count = block.shape[1] if block.ndim > 1 else 1
@@ -2017,14 +1493,23 @@ def transcribe_translate_worker(
         ]
         return " ".join(value for _, value in tail_history)[-600:]
 
-    def finalize_endpoint(pause_ms=0):
+    def emit_final_blocks(force=False, pause_ms=0.0):
         nonlocal sentence_buffer, buffer_started_at
-        blocks, sentence_buffer = take_endpoint_blocks(
-            sentence_buffer,
-            min_chars=min_block_chars,
-            max_chars=max_block_chars,
-            min_words=endpoint_min_words,
-        )
+        previous_buffer = sentence_buffer
+        if force:
+            blocks, sentence_buffer = take_endpoint_blocks(
+                sentence_buffer,
+                min_chars=min_block_chars,
+                max_chars=max_block_chars,
+                min_words=endpoint_min_words,
+            )
+        else:
+            blocks, sentence_buffer = take_confirmed_blocks_for_translation(
+                sentence_buffer,
+                min_chars=min_block_chars,
+                max_chars=max_block_chars,
+                max_sentences=max_sentences,
+            )
         for source_text in blocks:
             source_language, target_language = settings.get()
             translator.set_target(target_language)
@@ -2033,8 +1518,11 @@ def transcribe_translate_worker(
             if translated:
                 overlay.post_pair(source_text, translated, pause_ms=pause_ms)
                 note_context(source_text)
-        overlay.post_partial(sentence_case_text(strip_to_recent_text(sentence_buffer, 700)))
-        buffer_started_at = time.monotonic() if sentence_buffer else None
+        overlay.post_partial(sentence_case_text(sentence_buffer))
+        if not sentence_buffer:
+            buffer_started_at = None
+        elif blocks or sentence_buffer != previous_buffer or buffer_started_at is None:
+            buffer_started_at = time.monotonic()
 
     while not stop_event.is_set():
         if reset_gen is not None and reset_gen[0] != seen_gen:
@@ -2069,7 +1557,7 @@ def transcribe_translate_worker(
 
         if audio is None:
             if is_endpoint and sentence_mode:
-                finalize_endpoint(pause_ms=trailing_silence_ms)
+                emit_final_blocks(force=True, pause_ms=trailing_silence_ms)
             continue
 
         temp_path = None
@@ -2126,22 +1614,17 @@ def transcribe_translate_worker(
 
             translator.set_target(target_language)
             if sentence_mode:
-                # Whisper terminates every chunk with a period, even when the speaker
-                # only paused for breath. Drop that spurious terminator unless this chunk
-                # ended on a real (long) pause, so a single sentence isn't fragmented.
-                chunk_text = text
-                if not is_endpoint:
-                    stripped = re.sub(r"\s*[.!?…]+$", "", chunk_text).rstrip()
-                    chunk_text = stripped or chunk_text
-                sentence_buffer = merge_partial_buffer(sentence_buffer, chunk_text)
+                sentence_buffer = merge_partial_buffer(sentence_buffer, text)
                 if sentence_buffer and buffer_started_at is None:
                     buffer_started_at = now
-                overlay.post_partial(sentence_case_text(strip_to_recent_text(sentence_buffer, 700)))
+                overlay.post_partial(sentence_case_text(sentence_buffer))
                 buffer_age = (now - buffer_started_at) if buffer_started_at else 0.0
                 stable_timeout = max_partial_seconds > 0 and buffer_age >= max_partial_seconds
                 too_long = len(sentence_buffer) >= max_block_chars
                 if is_endpoint or stable_timeout or too_long:
-                    finalize_endpoint(pause_ms=trailing_silence_ms)
+                    emit_final_blocks(force=True, pause_ms=trailing_silence_ms)
+                else:
+                    emit_final_blocks(force=False)
             else:
                 translated = translator.translate(text)
                 if translated:
@@ -2304,7 +1787,7 @@ def streaming_worker(
 
             draft_clean = strip_hallucinations(draft)
             live = f"{committed_text} {draft_clean}".strip()
-            overlay.post_partial(sentence_case_text(strip_to_recent_text(live, 700)))
+            overlay.post_partial(sentence_case_text(live))
             overlay.post_status(audio_q.qsize())
         except Exception as exc:
             print(f"[stream] ошибка: {exc!r} — продолжаю", file=sys.stderr)
@@ -2390,8 +1873,8 @@ def parse_args():
     p.add_argument(
         "--max-partial-seconds",
         type=float,
-        default=5.0,
-        help="максимально держать live partial перед stable commit",
+        default=0.0,
+        help="максимально держать live partial перед stable commit; 0 = ждать смысловой границы",
     )
     p.add_argument(
         "--mutable-tail-seconds",
@@ -2437,7 +1920,7 @@ def parse_args():
     p.add_argument(
         "--max-block-chars",
         type=int,
-        default=600,
+        default=1200,
         help="максимальный размер смыслового блока перед переводом",
     )
     p.add_argument(
@@ -2479,6 +1962,11 @@ def parse_args():
     p.add_argument("--width", type=int, default=1100, help="ширина окна")
     p.add_argument("--height", type=int, default=520, help="высота окна")
     p.add_argument("--opacity", type=float, default=0.92, help="прозрачность окна")
+    p.add_argument(
+        "--show-partial",
+        action="store_true",
+        help="показывать live draft до финализации; по умолчанию UI показывает только завершённые блоки",
+    )
     p.add_argument("--no-window", action="store_true", help="выводить в терминал вместо окна")
     return p.parse_args()
 
@@ -2519,7 +2007,7 @@ def main():
     )
 
     overlay = (
-        ConsoleOverlay(stop_event)
+        ConsoleOverlay(stop_event, show_partial=args.show_partial)
         if args.no_window
         else GlassOverlay(
             stop_event,
@@ -2528,6 +2016,7 @@ def main():
             width=args.width,
             height=args.height,
             opacity=args.opacity,
+            show_partial=args.show_partial,
         )
     )
     overlay.reset_gen = reset_gen

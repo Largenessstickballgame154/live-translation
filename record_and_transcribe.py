@@ -1,4 +1,4 @@
-#!/Users/artemk/Desktop/os/.venv/bin/python
+#!/usr/bin/env python3
 """
 record_and_transcribe.py
 
@@ -46,7 +46,6 @@ from pathlib import Path
 
 import sounddevice as sd
 import soundfile as sf
-
 
 # Модели MLX Whisper с Hugging Face (скачиваются автоматически при первом запуске).
 #   large-v3  -> максимальная точность (рекомендуется, раз скорость не проблема)

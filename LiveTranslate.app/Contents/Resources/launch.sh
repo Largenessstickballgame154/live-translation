@@ -34,6 +34,10 @@ if [ ! -f "$SCRIPT" ]; then
     /usr/bin/osascript -e 'display alert "LiveTranslate" message "Проект указан, но скрипт не найден:\n'"$SCRIPT"'\n\nПроверь путь в:\n~/Library/Application Support/LiveTranslate/project_dir"'
     exit 1
 fi
+if [ ! -d "$PROJECT_DIR/live_translation" ]; then
+    /usr/bin/osascript -e 'display alert "LiveTranslate" message "Проект указан, но пакет live_translation не найден:\n'"$PROJECT_DIR/live_translation"'\n\nОбнови проект целиком или повтори ./install-app.sh из актуальной папки проекта."'
+    exit 1
+fi
 
 cd "$PROJECT_DIR" || exit 1
 

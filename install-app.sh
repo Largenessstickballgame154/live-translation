@@ -28,6 +28,10 @@ if [ ! -f "$PROJECT_DIR/live_translate_overlay.py" ]; then
     echo "Ошибка: запусти скрипт из папки проекта (нет live_translate_overlay.py)." >&2
     exit 1
 fi
+if [ ! -d "$PROJECT_DIR/live_translation" ]; then
+    echo "Ошибка: запусти скрипт из полной папки проекта (нет live_translation/)." >&2
+    exit 1
+fi
 
 echo "==> 1/3  Записываю путь к проекту в конфиг"
 mkdir -p "$CONFIG_DIR"

@@ -45,7 +45,7 @@ There are a lot of "whisper + something" projects on GitHub. I looked. Most fall
 
 What this combines, which I didn't find in one place: **any app's audio** (system-wide, not file/URL/one-call) + **a real LLM doing sentence-level translation** (not word-by-word MT) + **a floating glass overlay** you read on top of anything + **fully local** + a deliberate **don't-lose-words** design. It's not the fastest or the prettiest; it's the one that translates the *whole machine*, locally, into readable sentences.
 
-(It's also a single Python file you can actually read end to end, if that's your thing.)
+(It's still a small Python project you can actually read end to end, if that's your thing.)
 
 ## Quickstart
 
@@ -107,7 +107,7 @@ Two ways — pick whichever you like, they open the exact same overlay.
 ./.venv/bin/python live_translate_overlay.py --target ru
 ```
 
-(Call the venv's python directly — don't run `./live_translate_overlay.py`, its shebang is hard-coded.) This is also where you tweak anything: pass `--source es`, `--whisper medium`, etc. to make it behave *identically to the app's launcher*, add the flags the bundle uses by default:
+(Call the venv's python directly so you know you're using the environment from `./setup.sh`.) This is also where you tweak anything: pass `--source es`, `--whisper medium`, etc. to make it behave *identically to the app's launcher*, add the flags the bundle uses by default:
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py \
@@ -151,9 +151,9 @@ The window itself is draggable (grab anywhere) and resizable from the edges; con
 
 The naive version of this — chop audio into fixed 5s chunks, transcribe each one independently — is bad. Whisper sticks a period at the end of every chunk, cuts words in half at boundaries, and repeats itself. Most of the interesting work is in *not* doing that.
 
-- **Segmentation that doesn't lose anything (the default).** Audio is cut into chunks *at natural pauses* (found with VAD), not at fixed sizes, so words don't get sliced in half. Each chunk is transcribed exactly once, with overlap between chunks; an overlap-dedup merges the seams, a sentence assembler regroups text on real punctuation, and a spurious-period stripper removes the period Whisper adds at a chunk end when the speaker only paused for breath. The hard rule here is **no dropped audio**: the queues block instead of dropping, so if transcription falls behind for a moment it catches up rather than throwing speech away. For live news I'd rather be a second late than miss a word.
+- **Segmentation that doesn't lose anything (the default).** Audio is cut into chunks *at natural pauses* (found with VAD), not at fixed sizes, so words don't get sliced in half. Each chunk is transcribed exactly once, with overlap between chunks; an overlap-dedup merges the seams, a sentence assembler regroups text on real punctuation, and a spurious-period stripper removes the period Whisper adds at a chunk end when the speaker only paused for breath. The hard rule here is **no dropped audio**: the queues block instead of dropping, so if transcription falls behind for a moment it catches up rather than throwing speech away. The overlay shows finalized transcript/translation pairs by default, not a chopped live tail; I'd rather be a second late than show half a thought.
 
-- **A smoother (but lossy) streaming mode, off by default.** There's also a LocalAgreement-2 mode (`whisper-streaming` / WhisperLiveKit style): keep a rolling buffer, re-transcribe it every ~1.5s, and only *commit* a word once two consecutive passes agree on it, showing the unconfirmed tail as a dim live draft. It reads beautifully — text flows and self-corrects instead of appearing in blocks. But re-transcribing the same audio repeatedly is expensive, and to keep up with large-v3 it has to either drop audio or trim its buffer — i.e. **lose pieces**. Since I can't afford that, it's behind a flag; the default is the lossless chunker above. (It's the right call if you pair it with a faster model.)
+- **A smoother (but lossy) streaming mode, off by default.** There's also a LocalAgreement-2 mode (`whisper-streaming` / WhisperLiveKit style): keep a rolling buffer, re-transcribe it every ~1.5s, and only *commit* a word once two consecutive passes agree on it. It can show the unconfirmed tail as a dim live draft with `--show-partial`, but the default UI waits for finalized blocks. Streaming reads beautifully — text flows and self-corrects instead of appearing in blocks. But re-transcribing the same audio repeatedly is expensive, and to keep up with large-v3 it has to either drop audio or trim its buffer — i.e. **lose pieces**. Since I can't afford that, it's behind a flag; the default is the lossless chunker above. (It's the right call if you pair it with a faster model.)
 
 - **Surviving Whisper's punctuation drift.** On fast, pause-less speech Whisper sometimes stops emitting punctuation for a stretch — and because the recently finalized text is fed back as its `initial_prompt`, a punctuation-less run *reinforces itself* and the overlay collapses into one giant paragraph, then snaps back later. Two guards: (1) the prompt feedback is dropped whenever that recent context has no sentence punctuation, so the next chunk can re-introduce sentence boundaries instead of inheriting the drift; (2) when a block still arrives with no punctuation at all, it's split into readable paragraphs at clause boundaries (commas/dashes) or, failing that, at word boundaries near a target length — never one wall, never mid-word.
 
@@ -188,6 +188,7 @@ It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 --translator ollama        use ollama instead of MLX (e.g. for translategemma)
 --silence-rms 0.006        louder = stricter silence gate
 --vad-min-speech-ms 250    min real speech per window before whisper sees it
+--show-partial             also show the unfinalized live draft (off by default)
 # streaming mode (omit --legacy-chunking): smoother, but lossy under load
 --update-seconds 1.5       how often to re-transcribe the rolling buffer (lower = snappier, heavier)
 ```
@@ -213,17 +214,29 @@ None of this is clever. All of it was necessary.
 - large-v3 is not free. The default lossless chunker keeps up on an M-series Mac; if it ever can't, it stays correct but the subtitles drift a second or two behind (it won't drop words). On a smaller Mac use `--whisper medium`. The streaming mode is heavier still.
 - Auto language detection wobbles on mixed-language audio (Spanish news with Catalan inserts will flip-flop). Pin `--source` if you know it.
 - It still hallucinates sometimes. It's Whisper. We mitigate, we don't cure.
-- The code is one big file. It's a personal tool, not a framework. Sorry/not sorry.
+- The Cocoa overlay and audio workers are still intentionally compact, but the text pipeline and translation backends are split out and covered by tests.
 
 ## Layout
 
 ```
-live_translate_overlay.py   the whole thing (capture, VAD, ASR, translate, overlay)
+live_translate_overlay.py   CLI + orchestration + Cocoa overlay/audio workers
+live_translation/           tested text pipeline + translation backends
 LiveTranslate.app           double-clickable bundle (just launches the script via your venv)
 install-app.sh              put the .app in /Applications, detached from the project folder
 setup.sh / Brewfile         install everything
 requirements.txt            direct deps for normal install
 requirements.lock.txt       full pinned environment for exact reproduction
+requirements-dev.txt        lint/type/test tooling
+tests/                      fast unit tests for segmentation/cleanup behavior
+```
+
+## Developer checks
+
+```bash
+./.venv/bin/pip install -r requirements-dev.txt
+./.venv/bin/python -m ruff check .
+./.venv/bin/python -m pyright
+./.venv/bin/python -m pytest
 ```
 
 ## License / spirit
