@@ -152,11 +152,52 @@ _HALLUCINATION_RE = re.compile(
 )
 
 
+def _repeated_ngram_start(words, min_size=3, max_size=10, min_repeats=3):
+    if len(words) < min_size * min_repeats:
+        return None
+    upper_size = min(max_size, len(words) // min_repeats)
+    for size in range(upper_size, min_size - 1, -1):
+        positions = {}
+        for idx in range(len(words) - size + 1):
+            gram = tuple(words[idx : idx + size])
+            found = positions.setdefault(gram, [])
+            if found and idx < found[-1] + size:
+                continue
+            found.append(idx)
+            if len(found) >= min_repeats:
+                span_start = found[0]
+                span_end = found[-1] + size
+                repeated_coverage = len(found) * size / max(1, span_end - span_start)
+                if repeated_coverage >= 0.6:
+                    return span_start
+    return None
+
+
+def _strip_repeated_hallucination_loop(text):
+    matches = _word_matches(text)
+    words = [m.group(0).casefold().strip("'’-") for m in matches]
+    if len(words) < 12:
+        return text
+    lexical_diversity = len(set(words)) / len(words)
+    if len(words) >= 18 and lexical_diversity <= 0.35:
+        return ""
+    loop_start = _repeated_ngram_start(words)
+    if loop_start is None:
+        return text
+    if loop_start < 8 or loop_start / len(words) <= 0.35:
+        return ""
+    return text[: matches[loop_start].start()].rstrip(" ,.;:!?…-—")
+
+
 def strip_hallucinations(text):
     """Remove standalone Whisper boilerplate hallucinations."""
+    text = _strip_repeated_hallucination_loop(text)
+    if not text:
+        return ""
     cleaned = _HALLUCINATION_RE.sub(" ", text)
     cleaned = re.sub(r"\s+([,.;:!?…])", r"\1", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = _strip_repeated_hallucination_loop(cleaned)
     return cleaned.strip(" ,.;:!-—")
 
 

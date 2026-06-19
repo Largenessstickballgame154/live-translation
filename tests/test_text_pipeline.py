@@ -21,6 +21,37 @@ def test_strip_hallucinations_removes_standalone_boilerplate():
     )
 
 
+def test_strip_hallucinations_removes_repeated_russian_loop():
+    text = (
+        "ведущий закончил подробное объяснение бюджета и перешел к следующей теме, "
+        "красный сигнал снова горит, "
+        "красный сигнал снова горит, красный сигнал снова горит"
+    )
+    assert strip_hallucinations(text) == (
+        "ведущий закончил подробное объяснение бюджета и перешел к следующей теме"
+    )
+
+
+def test_strip_hallucinations_removes_repeated_english_loop():
+    text = (
+        "blue window keeps moving, blue window keeps moving, blue window keeps moving"
+    )
+    assert strip_hallucinations(text) == ""
+
+
+def test_strip_hallucinations_drops_short_prefix_before_loop():
+    text = (
+        "quick preface, silver frame turns left, silver frame turns left, "
+        "silver frame turns left"
+    )
+    assert strip_hallucinations(text) == ""
+
+
+def test_strip_hallucinations_keeps_non_repeated_channel_sentence():
+    text = "The analyst discussed how the channel grew after a public subscription campaign."
+    assert strip_hallucinations(text) == text.rstrip(".")
+
+
 def test_strip_llm_noise_removes_reasoning_and_code_fences():
     assert strip_llm_noise("<think>hidden</think>```text\nHallo\n```") == "Hallo"
 
@@ -61,6 +92,30 @@ def test_take_blocks_for_translation_respects_sentence_limit():
     )
     assert blocks == ["One sentence. Two sentence.", "Three sentence."]
     assert remaining == ""
+
+
+def test_take_blocks_force_emits_latest_complete_sentence():
+    blocks, remaining = take_blocks_for_translation(
+        "One complete sentence.",
+        min_chars=100,
+        max_chars=200,
+        max_sentences=5,
+        force=True,
+    )
+    assert blocks == ["One complete sentence."]
+    assert remaining == ""
+
+
+def test_take_blocks_force_keeps_unpunctuated_tail():
+    blocks, remaining = take_blocks_for_translation(
+        "This is not finished yet",
+        min_chars=1,
+        max_chars=200,
+        max_sentences=5,
+        force=True,
+    )
+    assert blocks == []
+    assert remaining == "This is not finished yet"
 
 
 def test_take_confirmed_blocks_holds_newest_terminal_sentence():

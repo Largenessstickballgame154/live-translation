@@ -48,11 +48,13 @@ import sounddevice as sd
 import soundfile as sf
 
 # Модели MLX Whisper с Hugging Face (скачиваются автоматически при первом запуске).
-#   large-v3  -> максимальная точность (рекомендуется, раз скорость не проблема)
+#   large-v3  -> максимальная точность (рекомендуется, если скорость не проблема)
+#   turbo     -> быстрее large-v3, немного менее точно
 #   small     -> быстрее, менее точно
 #   tiny      -> очень быстро, для черновиков
 MODELS = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
     "medium": "mlx-community/whisper-medium-mlx",
     "small": "mlx-community/whisper-small-mlx",
     "tiny": "mlx-community/whisper-tiny-mlx",

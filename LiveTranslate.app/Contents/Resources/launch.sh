@@ -53,5 +53,5 @@ fi
 
 {
     echo "===== $(date) :: launch ====="
-    exec "$PY" "$SCRIPT" --whisper medium --ollama-model gemma4:12b-mlx "$@"
+    exec "$PY" "$SCRIPT" --legacy-chunking --whisper turbo --ollama-model gemma4:26b-mlx --ollama-num-ctx 4096 "$@"
 } >> "$LOG" 2>&1

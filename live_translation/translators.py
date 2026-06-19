@@ -51,7 +51,17 @@ class LanguageSettings:
 
 
 class OllamaTranslator:
-    def __init__(self, model, target, url, max_tokens, temperature, reasoning, source="auto"):
+    def __init__(
+        self,
+        model,
+        target,
+        url,
+        max_tokens,
+        temperature,
+        reasoning,
+        source="auto",
+        num_ctx=4096,
+    ):
         self.model = model
         self.target = target
         self.source = source
@@ -60,6 +70,7 @@ class OllamaTranslator:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.reasoning = reasoning
+        self.num_ctx = num_ctx
         self.translategemma = "translategemma" in model.lower() or "translate-gemma" in model.lower()
 
     def set_model(self, model):
@@ -74,7 +85,7 @@ class OllamaTranslator:
 
     def _unload(self, model):
         """Best-effort: ask Ollama to drop a model from memory (keep_alive=0)."""
-        payload = {"model": model, "keep_alive": 0}
+        payload = {"model": model, "prompt": "", "stream": False, "keep_alive": 0}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.generate_url,
@@ -84,9 +95,22 @@ class OllamaTranslator:
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
+                raw = resp.read()
+            if raw:
+                body = json.loads(raw.decode("utf-8"))
+                done_reason = body.get("done_reason")
+                if done_reason not in (None, "unload"):
+                    print(
+                        f"[translate] Ollama не подтвердил выгрузку {model}: {done_reason}",
+                        file=sys.stderr,
+                    )
         except urllib.error.URLError as exc:
             print(f"[translate] не удалось выгрузить {model}: {exc}", file=sys.stderr)
+
+    def unload_models_except(self, models, keep_model):
+        for model in models:
+            if model and model != keep_model:
+                self._unload(model)
 
     def set_target(self, target):
         self.target = target
@@ -96,6 +120,14 @@ class OllamaTranslator:
 
     def translate(self, text, max_tokens=None):
         num_predict = int(max_tokens or self.max_tokens)
+        options = {
+            "temperature": self.temperature,
+            "num_predict": num_predict,
+            "top_p": 0.8,
+            "top_k": 20,
+        }
+        if self.num_ctx:
+            options["num_ctx"] = int(self.num_ctx)
         if self.translategemma and self.source and self.source != "auto":
             prompt = translategemma_prompt(self.source, self.target, text)
             payload = {
@@ -103,12 +135,7 @@ class OllamaTranslator:
                 "prompt": prompt,
                 "stream": False,
                 "keep_alive": "30m",
-                "options": {
-                    "temperature": self.temperature,
-                    "num_predict": num_predict,
-                    "top_p": 0.8,
-                    "top_k": 20,
-                },
+                "options": options,
             }
             url = self.generate_url
         else:
@@ -118,12 +145,7 @@ class OllamaTranslator:
                 "stream": False,
                 "think": bool(self.reasoning),
                 "keep_alive": "30m",
-                "options": {
-                    "temperature": self.temperature,
-                    "num_predict": num_predict,
-                    "top_p": 0.8,
-                    "top_k": 20,
-                },
+                "options": options,
             }
             url = self.chat_url
         data = json.dumps(payload).encode("utf-8")

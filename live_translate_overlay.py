@@ -24,6 +24,7 @@ Multi-Output Device = твои наушники/колонки + BlackHole 2ch.
 """
 
 import argparse
+import gc
 import os
 import queue
 import re
@@ -59,12 +60,14 @@ from live_translation.translators import LanguageSettings, OllamaTranslator
 WHISPER_MODELS = {
     "small": "mlx-community/whisper-small-mlx",
     "medium": "mlx-community/whisper-medium-mlx",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
     "large": "mlx-community/whisper-large-v3-mlx",
 }
 
 WHISPER_MENU = [
     ("small", "Whisper Small"),
     ("medium", "Whisper Medium"),
+    ("turbo", "Whisper Turbo"),
     ("large", "Whisper Large"),
 ]
 
@@ -75,6 +78,29 @@ GEMMA_MODELS = {
 }
 
 GEMMA_MENU = list(GEMMA_MODELS.items())
+
+TEXT_COLOR_OPTIONS = [
+    ("white", "White", (1.0, 1.0, 1.0)),
+    ("black", "Black", (0.02, 0.02, 0.02)),
+    ("warm", "Warm", (1.0, 0.91, 0.76)),
+    ("cyan", "Cyan", (0.70, 0.93, 1.0)),
+    ("mint", "Mint", (0.72, 1.0, 0.84)),
+    ("rose", "Rose", (1.0, 0.76, 0.84)),
+]
+TEXT_COLOR_RGB = {code: rgb for code, _label, rgb in TEXT_COLOR_OPTIONS}
+
+TXT_SECTION_TITLES = {
+    "auto": ("ТРАНСКРИПЦИЯ", "ПЕРЕВОД"),
+    "en": ("TRANSCRIPTION", "TRANSLATION"),
+    "ru": ("ТРАНСКРИПЦИЯ", "ПЕРЕВОД"),
+    "es": ("TRANSCRIPCIÓN", "TRADUCCIÓN"),
+    "de": ("TRANSKRIPTION", "ÜBERSETZUNG"),
+    "fr": ("TRANSCRIPTION", "TRADUCTION"),
+    "it": ("TRASCRIZIONE", "TRADUZIONE"),
+    "pt": ("TRANSCRIÇÃO", "TRADUÇÃO"),
+    "uk": ("ТРАНСКРИПЦІЯ", "ПЕРЕКЛАД"),
+    "zh": ("转录", "翻译"),
+}
 
 DEFAULT_AUDIO_QUEUE_BLOCKS = 120
 STREAM_CATCHUP_HIGH_WATER = 40
@@ -143,11 +169,19 @@ class ConsoleOverlay:
         pause_ms=0,
         replace_translation_tail=False,
         combined_source=None,
+        append_source=True,
+        source_language=None,
     ):
-        print("\n--- transcript ---")
-        print(source)
+        if append_source and source:
+            print("\n--- transcript ---")
+            print(source)
         print("--- translation" + (" (revised) ---" if replace_translation_tail else " ---"))
         print(translated, flush=True)
+
+    def post_source(self, source, pause_ms=0):
+        if source:
+            print("\n--- transcript ---")
+            print(source, flush=True)
 
     def post_status(self, lag_chunks):
         if lag_chunks:
@@ -261,7 +295,6 @@ class GlassOverlay:
                 NSOnState,
                 NSPopUpButton,
                 NSScrollView,
-                NSSlider,
                 NSSwitchButton,
                 NSTextField,
                 NSTextView,
@@ -299,7 +332,6 @@ class GlassOverlay:
         self.NSFloatingWindowLevel = NSFloatingWindowLevel
         self.NSOffState = NSOffState
         self.NSOnState = NSOnState
-        self.NSSlider = NSSlider
         self.NSMutableAttributedString = NSMutableAttributedString
         self.NSMomentaryPushInButton = NSMomentaryPushInButton
         self.NSSwitchButton = NSSwitchButton
@@ -322,6 +354,8 @@ class GlassOverlay:
         self.compact_mode = False
         self.pin_enabled = True
         self.settings_visible = False
+        self.text_color_visible = False
+        self.text_color_code = "white"
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
 
@@ -331,9 +365,6 @@ class GlassOverlay:
 
             def pinChanged_(menu_self, sender):
                 self._pin_changed(sender)
-
-            def opacityChanged_(menu_self, sender):
-                self._opacity_changed(sender)
 
             def smallerText_(menu_self, sender):
                 self._adjust_text_size(-1)
@@ -353,8 +384,17 @@ class GlassOverlay:
             def savePDF_(menu_self, sender):
                 self._save_pdf(sender)
 
+            def saveTXT_(menu_self, sender):
+                self._save_txt(sender)
+
             def settingsToggled_(menu_self, sender):
                 self._settings_toggled(sender)
+
+            def textColorToggled_(menu_self, sender):
+                self._text_color_toggled(sender)
+
+            def textColorChanged_(menu_self, sender):
+                self._text_color_changed(sender)
 
             def whisperChanged_(menu_self, sender):
                 self._whisper_changed(sender)
@@ -390,7 +430,7 @@ class GlassOverlay:
         self.window.setMovableByWindowBackground_(True)
         self.window.setOpaque_(False)
         self.window.setBackgroundColor_(NSColor.clearColor())
-        self.window.setAlphaValue_(opacity)
+        self.window.setAlphaValue_(1.0)
         self.window.setLevel_(NSFloatingWindowLevel)
         self.window.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -414,77 +454,80 @@ class GlassOverlay:
         scroll_y = inset
         label_y = scroll_y + scroll_height + 6
         menu_y = label_y + column_label_height + 18
+        button_h = 28
+        item_gap = 6
+        group_gap = 18
         status_width = 120
         target_width = 140
         source_width = 126
-        control_gap = 18
-        status_x = width - inset - status_width
-        target_label_x = status_x - control_gap - target_width - 44
-        target_popup_x = target_label_x + 44
-        source_label_x = target_label_x - control_gap - source_width - 48
-        source_popup_x = source_label_x + 48
-
         controls_x = inset
+        compact_x = controls_x
+        pin_x = compact_x + 78 + item_gap
+        source_label_x = pin_x + 48 + group_gap
+        source_popup_x = source_label_x + 36
+        target_label_x = source_popup_x + source_width + 14
+        target_popup_x = target_label_x + 24
+        status_x = width - inset - status_width
+        save_x = status_x - group_gap - 50
+        save_txt_x = save_x - item_gap - 50
+        settings_x = save_txt_x - group_gap - 32
+        clear_x = settings_x - item_gap - 40
+        text_color_x = clear_x - group_gap - 32
+        larger_x = text_color_x - item_gap - 32
+        smaller_x = larger_x - item_gap - 32
+
         self.compact_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 78, 28),
+            NSMakeRect(compact_x, menu_y, 78, button_h),
             "Compact",
             "compactChanged:",
             momentary=True,
         )
-        controls_x += 86
         self.pin_button = self._make_button(
-            NSMakeRect(controls_x, menu_y + 2, 48, 24),
+            NSMakeRect(pin_x, menu_y, 48, button_h),
             "Pin",
             "pinChanged:",
         )
         self.pin_button.setState_(NSOnState)
-        controls_x += 56
-        self.opacity_label = self._make_label(
-            NSTextField,
-            "Opacity",
-            NSMakeRect(controls_x, menu_y + 5, 46, 18),
-            size=12,
-            alpha=0.62,
-        )
-        visual.addSubview_(self.opacity_label)
-        controls_x += 50
-        self.opacity_slider = NSSlider.alloc().initWithFrame_(
-            NSMakeRect(controls_x, menu_y + 2, 86, 24)
-        )
-        self.opacity_slider.setMinValue_(0.35)
-        self.opacity_slider.setMaxValue_(1.0)
-        self.opacity_slider.setDoubleValue_(opacity)
-        self.opacity_slider.setTarget_(self.menu_target)
-        self.opacity_slider.setAction_("opacityChanged:")
-        controls_x += 96
         self.smaller_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 32, 28),
+            NSMakeRect(smaller_x, menu_y, 32, button_h),
             "A-",
             "smallerText:",
             momentary=True,
         )
-        controls_x += 36
         self.larger_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 32, 28),
+            NSMakeRect(larger_x, menu_y, 32, button_h),
             "A+",
             "largerText:",
             momentary=True,
         )
+        self.text_color_button = self._make_button(
+            NSMakeRect(text_color_x, menu_y, 32, button_h),
+            "Color",
+            "textColorToggled:",
+            momentary=True,
+        )
+        self._set_text_color_icon(self.text_color_button)
         self.clear_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 40, 28),
+            NSMakeRect(clear_x, menu_y, 40, button_h),
             "Clear",
             "clearAll:",
             momentary=True,
         )
         self._set_trash_icon(self.clear_button)
         self.save_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 50, 28),
+            NSMakeRect(save_x, menu_y, 50, button_h),
             "PDF",
             "savePDF:",
             momentary=True,
         )
+        self.save_txt_button = self._make_button(
+            NSMakeRect(save_txt_x, menu_y, 50, button_h),
+            "TXT",
+            "saveTXT:",
+            momentary=True,
+        )
         self.settings_button = self._make_button(
-            NSMakeRect(controls_x, menu_y, 32, 28),
+            NSMakeRect(settings_x, menu_y, 32, button_h),
             "Settings",
             "settingsToggled:",
             momentary=True,
@@ -493,11 +536,12 @@ class GlassOverlay:
         for control in (
             self.compact_button,
             self.pin_button,
-            self.opacity_slider,
             self.smaller_button,
             self.larger_button,
+            self.text_color_button,
             self.clear_button,
             self.save_button,
+            self.save_txt_button,
             self.settings_button,
         ):
             visual.addSubview_(control)
@@ -519,8 +563,8 @@ class GlassOverlay:
 
         self.source_label = self._make_label(
             NSTextField,
-            "Source",
-            NSMakeRect(source_label_x, menu_y + 5, 44, 18),
+            "From",
+            NSMakeRect(source_label_x, menu_y + 5, 34, 18),
             size=12,
             alpha=0.72,
         )
@@ -528,8 +572,8 @@ class GlassOverlay:
         visual.addSubview_(self.source_popup)
         self.target_label = self._make_label(
             NSTextField,
-            "Target",
-            NSMakeRect(target_label_x, menu_y + 5, 40, 18),
+            "To",
+            NSMakeRect(target_label_x, menu_y + 5, 22, 18),
             size=12,
             alpha=0.72,
         )
@@ -558,6 +602,43 @@ class GlassOverlay:
         except Exception:
             pass
         visual.addSubview_(self.settings_panel)
+
+        self.text_color_panel = NSVisualEffectView.alloc().initWithFrame_(
+            NSMakeRect(inset + 300, menu_y - 62, 304, 52)
+        )
+        self.text_color_panel.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+        self.text_color_panel.setMaterial_(NSVisualEffectMaterialHUDWindow)
+        self.text_color_panel.setState_(NSVisualEffectStateActive)
+        self.text_color_panel.setHidden_(True)
+        self.text_color_panel.setWantsLayer_(True)
+        try:
+            self.text_color_panel.layer().setCornerRadius_(14.0)
+            self.text_color_panel.layer().setMasksToBounds_(True)
+        except Exception:
+            pass
+        visual.addSubview_(self.text_color_panel)
+
+        self.text_color_label = self._make_label(
+            NSTextField,
+            "Text color",
+            NSMakeRect(14, 18, 72, 18),
+            size=12,
+            alpha=0.72,
+        )
+        self.text_color_buttons = {}
+        for idx, (code, label, rgb) in enumerate(TEXT_COLOR_OPTIONS):
+            button = self._make_color_swatch_button(
+                NSMakeRect(96 + idx * 34, 16, 26, 20),
+                code,
+                label,
+                rgb,
+                idx,
+            )
+            self.text_color_buttons[code] = button
+        self.text_color_panel.addSubview_(self.text_color_label)
+        for button in self.text_color_buttons.values():
+            self.text_color_panel.addSubview_(button)
+        self._refresh_text_color_buttons()
 
         self.whisper_settings_label = self._make_label(
             NSTextField,
@@ -679,6 +760,8 @@ class GlassOverlay:
         self.right_scroll.setDocumentView_(self.translated_view)
         self.settings_panel.removeFromSuperview()
         visual.addSubview_(self.settings_panel)
+        self.text_color_panel.removeFromSuperview()
+        visual.addSubview_(self.text_color_panel)
 
         self.NSApp = NSApp
         self._layout_ready = True
@@ -701,56 +784,67 @@ class GlassOverlay:
         scroll_y = inset
         label_y = scroll_y + scroll_height + 6
         menu_y = label_y + column_label_height + 18
+        button_h = 28
+        item_gap = 6
+        group_gap = 18
         status_width = 120
         target_width = 140
         source_width = 126
-        control_gap = 18
-        save_x = width - inset - 50
-        settings_x = save_x - 10 - 32
-        clear_x = settings_x - 10 - 40
-        status_x = clear_x - control_gap - status_width
-        target_label_x = status_x - control_gap - target_width - 44
-        target_popup_x = target_label_x + 44
-        source_label_x = target_label_x - control_gap - source_width - 48
-        source_popup_x = source_label_x + 48
+        status_x = width - inset - status_width
+        save_x = status_x - group_gap - 50
+        save_txt_x = save_x - item_gap - 50
+        settings_x = save_txt_x - group_gap - 32
+        clear_x = settings_x - item_gap - 40
+        text_color_x = clear_x - group_gap - 32
+        larger_x = text_color_x - item_gap - 32
+        smaller_x = larger_x - item_gap - 32
+        compact_x = inset
+        pin_x = compact_x + 78 + item_gap
+        source_label_x = pin_x + 48 + group_gap
+        source_popup_x = source_label_x + 36
+        target_label_x = source_popup_x + source_width + 14
+        target_popup_x = target_label_x + 24
 
-        controls_x = inset
-        self.compact_button.setFrame_(self.NSMakeRect(controls_x, menu_y, 78, 28))
-        controls_x += 86
-        self.pin_button.setFrame_(self.NSMakeRect(controls_x, menu_y + 2, 48, 24))
-        controls_x += 56
-        self.opacity_label.setFrame_(self.NSMakeRect(controls_x, menu_y + 5, 46, 18))
-        controls_x += 50
-        self.opacity_slider.setFrame_(self.NSMakeRect(controls_x, menu_y + 2, 86, 24))
-        controls_x += 96
-        self.smaller_button.setFrame_(self.NSMakeRect(controls_x, menu_y, 32, 28))
-        controls_x += 36
-        self.larger_button.setFrame_(self.NSMakeRect(controls_x, menu_y, 32, 28))
+        self.compact_button.setFrame_(self.NSMakeRect(compact_x, menu_y, 78, button_h))
+        self.pin_button.setFrame_(self.NSMakeRect(pin_x, menu_y, 48, button_h))
+        self.smaller_button.setFrame_(self.NSMakeRect(smaller_x, menu_y, 32, button_h))
+        self.larger_button.setFrame_(self.NSMakeRect(larger_x, menu_y, 32, button_h))
+        self.text_color_button.setFrame_(self.NSMakeRect(text_color_x, menu_y, 32, button_h))
 
-        self.save_button.setFrame_(self.NSMakeRect(save_x, menu_y, 50, 28))
-        self.settings_button.setFrame_(self.NSMakeRect(settings_x, menu_y, 32, 28))
-        self.clear_button.setFrame_(self.NSMakeRect(clear_x, menu_y, 40, 28))
-        self.source_label.setFrame_(self.NSMakeRect(source_label_x, menu_y + 5, 44, 18))
+        self.save_button.setFrame_(self.NSMakeRect(save_x, menu_y, 50, button_h))
+        self.save_txt_button.setFrame_(self.NSMakeRect(save_txt_x, menu_y, 50, button_h))
+        self.settings_button.setFrame_(self.NSMakeRect(settings_x, menu_y, 32, button_h))
+        self.clear_button.setFrame_(self.NSMakeRect(clear_x, menu_y, 40, button_h))
+        self.source_label.setFrame_(self.NSMakeRect(source_label_x, menu_y + 5, 34, 18))
         self.source_popup.setFrame_(self.NSMakeRect(source_popup_x, menu_y, source_width, 28))
-        self.target_label.setFrame_(self.NSMakeRect(target_label_x, menu_y + 5, 40, 18))
+        self.target_label.setFrame_(self.NSMakeRect(target_label_x, menu_y + 5, 22, 18))
         self.target_popup.setFrame_(self.NSMakeRect(target_popup_x, menu_y, target_width, 28))
         self.status_label.setFrame_(self.NSMakeRect(status_x, menu_y + 5, status_width, 18))
 
-        # Right-side controls hide progressively when the window is too narrow, so they
-        # never overlap the left cluster (Compact/Pin/Opacity/A-/A+). Clear/Save are
-        # right-anchored and the last to go; Source is the first.
-        left_end = inset + 86 + 56 + 50 + 96 + 36 + 32  # right edge of left cluster
-        edge = left_end + 12
+        # Left language controls sit after Pin and are the last to disappear. Right-side
+        # controls hide first, from low-priority status/export/actions toward text controls.
+        language_end = target_popup_x + target_width
+        source_end = source_popup_x + source_width
+        edge = language_end + 12
+        show_status = status_x >= edge
         show_save = save_x >= edge
+        show_save_txt = save_txt_x >= edge
         show_settings = settings_x >= edge
         show_clear = clear_x >= edge
-        show_status = status_x >= edge
-        show_target = target_label_x >= edge
-        show_source = source_label_x >= edge
+        show_text_color = text_color_x >= edge
+        show_larger = larger_x >= edge
+        show_smaller = smaller_x >= edge
+        show_target = width - inset >= language_end
+        show_source = width - inset >= source_end
         self.save_button.setHidden_(not show_save)
+        self.save_txt_button.setHidden_(not show_save_txt)
         self.settings_button.setHidden_(not show_settings)
         self.clear_button.setHidden_(not show_clear)
         self.settings_panel.setHidden_((not self.settings_visible) or (not show_settings))
+        self.smaller_button.setHidden_(not show_smaller)
+        self.larger_button.setHidden_(not show_larger)
+        self.text_color_button.setHidden_(not show_text_color)
+        self.text_color_panel.setHidden_((not self.text_color_visible) or (not show_text_color))
         self.status_label.setHidden_(not show_status)
         self.target_label.setHidden_(not show_target)
         self.target_popup.setHidden_(not show_target)
@@ -795,6 +889,23 @@ class GlassOverlay:
         self.model_settings_label.setFrame_(self.NSMakeRect(model_x, 42, 54, 18))
         self.ollama_model_popup.setFrame_(self.NSMakeRect(model_x + 58, 36, max(120, panel_w - model_x - 72), 28))
         self.settings_hint_label.setFrame_(self.NSMakeRect(14, 12, panel_w - 28, 18))
+        color_panel_h = 52
+        color_panel_w = min(320, max(304, width - inset * 2))
+        color_panel_x = min(max(inset, text_color_x - 136), width - inset - color_panel_w)
+        color_panel_y = max(scroll_y + 8, menu_y - 62)
+        self.text_color_panel.setFrame_(
+            self.NSMakeRect(color_panel_x, color_panel_y, color_panel_w, color_panel_h)
+        )
+        self.text_color_label.setFrame_(self.NSMakeRect(14, 18, 72, 18))
+        swatch_x = 96
+        swatch_w = 26
+        swatch_gap = max(
+            5,
+            min(9, (color_panel_w - swatch_x - 14 - swatch_w * len(TEXT_COLOR_OPTIONS)) / 5),
+        )
+        for code, _label, _rgb in TEXT_COLOR_OPTIONS:
+            self.text_color_buttons[code].setFrame_(self.NSMakeRect(swatch_x, 16, swatch_w, 20))
+            swatch_x += swatch_w + swatch_gap
         # Re-flow text into the new frames; without this the resized text views go blank.
         self._render_original()
         self._render_translation()
@@ -818,6 +929,24 @@ class GlassOverlay:
         button.setTarget_(self.menu_target)
         button.setAction_(action)
         button.setFont_(self.NSFont.systemFontOfSize_weight_(12, 0.18))
+        return button
+
+    def _make_color_swatch_button(self, frame, code, label, rgb, tag):
+        button = self.NSButton.alloc().initWithFrame_(frame)
+        button.setTitle_("")
+        button.setButtonType_(self.NSMomentaryPushInButton)
+        button.setBordered_(False)
+        button.setTag_(tag)
+        button.setToolTip_(label)
+        button.setTarget_(self.menu_target)
+        button.setAction_("textColorChanged:")
+        button.setWantsLayer_(True)
+        layer = button.layer()
+        if layer is not None:
+            layer.setCornerRadius_(7.0)
+            layer.setBackgroundColor_(self._ns_color_from_rgb(rgb).CGColor())
+            layer.setBorderWidth_(1.0)
+            layer.setBorderColor_(self.NSColor.whiteColor().colorWithAlphaComponent_(0.28).CGColor())
         return button
 
     def _set_trash_icon(self, button):
@@ -853,6 +982,49 @@ class GlassOverlay:
         except Exception:
             pass
 
+    def _set_text_color_icon(self, button):
+        try:
+            from AppKit import NSImage, NSImageOnly
+
+            img = None
+            for symbol in ("textformat", "paintbrush.pointed", "paintpalette"):
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    symbol,
+                    "Text color",
+                )
+                if img is not None:
+                    break
+            if img is not None:
+                button.setImage_(img)
+                button.setImagePosition_(NSImageOnly)
+                button.setTitle_("")
+                try:
+                    button.setContentTintColor_(self.NSColor.whiteColor())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _ns_color_from_rgb(self, rgb, alpha=1.0):
+        r, g, b = rgb
+        return self.NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, alpha)
+
+    def _text_color(self, alpha=1.0):
+        return self._ns_color_from_rgb(
+            TEXT_COLOR_RGB.get(self.text_color_code, TEXT_COLOR_RGB["white"]),
+            alpha,
+        )
+
+    def _refresh_text_color_buttons(self):
+        for code, button in getattr(self, "text_color_buttons", {}).items():
+            layer = button.layer()
+            if layer is None:
+                continue
+            selected = code == self.text_color_code
+            layer.setBorderWidth_(2.0 if selected else 1.0)
+            border = self.NSColor.whiteColor().colorWithAlphaComponent_(0.92 if selected else 0.28)
+            layer.setBorderColor_(border.CGColor())
+
     def _make_line(self, frame, color):
         line = self.NSView.alloc().initWithFrame_(frame)
         line.setWantsLayer_(True)
@@ -880,7 +1052,7 @@ class GlassOverlay:
         view.setEditable_(False)
         view.setSelectable_(True)
         view.setDrawsBackground_(False)
-        view.setTextColor_(self.NSColor.whiteColor())
+        view.setTextColor_(self._text_color())
         view.setFont_(self.NSFont.systemFontOfSize_weight_(20, 0.22))
         # Padding so text doesn't butt against the divider / window edge.
         view.setTextContainerInset_(self.NSMakeSize(10, 6))
@@ -909,8 +1081,33 @@ class GlassOverlay:
 
     def _settings_toggled(self, sender):
         self.settings_visible = not self.settings_visible
+        if self.settings_visible:
+            self.text_color_visible = False
+            self.text_color_panel.setHidden_(True)
         self.settings_panel.setHidden_(not self.settings_visible)
         self._relayout()
+
+    def _text_color_toggled(self, sender):
+        self.text_color_visible = not self.text_color_visible
+        if self.text_color_visible:
+            self.settings_visible = False
+            self.settings_panel.setHidden_(True)
+        self.text_color_panel.setHidden_(not self.text_color_visible)
+        self._relayout()
+
+    def _text_color_changed(self, sender):
+        idx = int(sender.tag())
+        if idx < 0 or idx >= len(TEXT_COLOR_OPTIONS):
+            return
+        code = TEXT_COLOR_OPTIONS[idx][0]
+        if code not in TEXT_COLOR_RGB:
+            return
+        self.text_color_code = code
+        self.original_view.setTextColor_(self._text_color())
+        self.translated_view.setTextColor_(self._text_color())
+        self._refresh_text_color_buttons()
+        self._render_original()
+        self._render_translation()
 
     def _whisper_changed(self, sender):
         code = self._selected_code(sender)
@@ -921,17 +1118,7 @@ class GlassOverlay:
         code = self._selected_code(sender)
         if code not in GEMMA_MODELS:
             return
-        previous = self.settings.get_ollama_model()
         self.settings.set_ollama_model(code)
-        translator = getattr(self, "translator", None)
-        if previous and previous != code and translator is not None:
-            # Free the old model from VRAM right now, on a background thread so the menu
-            # doesn't hang on the Ollama unload request. The new model loads on the next
-            # translation. (The translation worker would also unload it on its next phrase;
-            # a double unload is harmless.)
-            threading.Thread(
-                target=translator._unload, args=(previous,), daemon=True
-            ).start()
 
     def _compact_changed(self, sender):
         self.compact_mode = not self.compact_mode
@@ -953,9 +1140,6 @@ class GlassOverlay:
     def _pin_changed(self, sender):
         self.pin_enabled = sender.state() == self.NSOnState
         self.window.setLevel_(self.NSFloatingWindowLevel if self.pin_enabled else self.NSNormalWindowLevel)
-
-    def _opacity_changed(self, sender):
-        self.window.setAlphaValue_(sender.doubleValue())
 
     def _adjust_text_size(self, delta):
         self.font_size = max(14, min(32, self.font_size + delta))
@@ -986,6 +1170,77 @@ class GlassOverlay:
             alert.runModal()
         except Exception:
             print(f"[{title}] {message}", file=sys.stderr)
+
+    def _history_section_text(self, key):
+        blocks = []
+        for pair in self.history_pairs:
+            text = str(pair.get(key) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            if text:
+                blocks.append(text)
+        return "\n\n".join(blocks)
+
+    def _txt_section_title(self, code, section):
+        code = (code or "auto").lower()
+        idx = 0 if section == "transcript" else 1
+        return TXT_SECTION_TITLES.get(code, TXT_SECTION_TITLES["ru"])[idx]
+
+    def _txt_transcript_title(self):
+        source_code, _target_code = self.settings.get()
+        if source_code != "auto":
+            return self._txt_section_title(source_code, "transcript")
+        for pair in self.history_pairs:
+            detected = str(pair.get("source_language") or "").lower().strip()
+            if detected and detected != "auto" and detected in TXT_SECTION_TITLES:
+                return self._txt_section_title(detected, "transcript")
+        return self._txt_section_title("auto", "transcript")
+
+    def _save_txt(self, sender=None):
+        import datetime
+
+        from AppKit import NSSavePanel
+
+        if not self.history_pairs:
+            self._notify("Нечего сохранять", "Пока нет переведённого текста.")
+            return
+
+        transcript = self._history_section_text("source")
+        translation = self._history_section_text("translated")
+        if not transcript and not translation:
+            self._notify("Нечего сохранять", "Пока нет текста для TXT.")
+            return
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        panel = NSSavePanel.savePanel()
+        panel.setNameFieldStringValue_(f"LiveTranslate-{ts}.txt")
+        try:
+            panel.setAllowedFileTypes_(["txt"])
+        except Exception:
+            pass
+        self.app.activateIgnoringOtherApps_(True)
+        if panel.runModal() != 1:  # 1 == NSModalResponseOK
+            return
+        path = panel.URL().path()
+
+        _source_code, target_code = self.settings.get()
+        transcript_title = self._txt_transcript_title()
+        translation_title = self._txt_section_title(target_code, "translation")
+        content = (
+            f"{transcript_title}\n\n"
+            f"{transcript}\n\n\n"
+            f"{translation_title}\n\n"
+            f"{translation}\n"
+        )
+        ok = False
+        try:
+            Path(path).write_text(content, encoding="utf-8")
+            ok = Path(path).exists() and Path(path).stat().st_size > 0
+        except Exception as exc:
+            print(f"[txt] не удалось сохранить TXT: {exc}", file=sys.stderr)
+
+        self._notify(
+            "TXT сохранён" if ok else "Ошибка",
+            path if ok else "Не удалось записать файл.",
+        )
 
     def _save_pdf(self, sender=None):
         import datetime
@@ -1019,11 +1274,11 @@ class GlassOverlay:
         )
         from Foundation import NSURL
         from Quartz import (
-            CGRectMake,
             CGPDFContextBeginPage,
             CGPDFContextClose,
             CGPDFContextCreateWithURL,
             CGPDFContextEndPage,
+            CGRectMake,
         )
 
         NSColor = self.NSColor
@@ -1072,7 +1327,6 @@ class GlassOverlay:
             return p
 
         ps_body = para(line_spacing=1.6)
-        ps_label = para(after=2.0)
         ps_label_before = para(after=2.0, before=8.0)
         ps_time = para(after=3.0)
         ps_footer = para(line_spacing=1.2)
@@ -1104,7 +1358,7 @@ class GlassOverlay:
             elapsed = pair.get("elapsed")
             if elapsed is None:
                 absolute = pair.get("time")
-                if isinstance(absolute, (int, float)):
+                if isinstance(absolute, int | float):
                     elapsed = absolute - getattr(self, "session_started_at", absolute)
             if elapsed is None:
                 return "--:--:--"
@@ -1282,6 +1536,8 @@ class GlassOverlay:
         pause_ms=0,
         replace_translation_tail=False,
         combined_source=None,
+        append_source=True,
+        source_language=None,
     ):
         self.AppHelper.callAfter(
             self._append_pair,
@@ -1290,12 +1546,17 @@ class GlassOverlay:
             pause_ms,
             replace_translation_tail,
             combined_source,
+            append_source,
+            source_language,
         )
 
     def post_partial(self, source):
         if not self.show_partial:
             return
         self.AppHelper.callAfter(self._set_partial, source)
+
+    def post_source(self, source, pause_ms=0):
+        self.AppHelper.callAfter(self._append_source, source, pause_ms)
 
     def post_status(self, lag_chunks):
         lag_chunks = int(lag_chunks)
@@ -1323,12 +1584,15 @@ class GlassOverlay:
         pause_ms=0,
         replace_translation_tail=False,
         combined_source=None,
+        append_source=True,
+        source_language=None,
     ):
         # Guard the main-thread render path: an exception here can stop the run loop from
         # delivering further UI updates, freezing the display while workers keep running.
         try:
             now = time.monotonic()
             speaker_gap = pause_ms >= 1400
+            source_language = str(source_language or "").strip()
             if source and not str(translated).startswith("Ошибка:"):
                 if replace_translation_tail and self.history_pairs:
                     previous = self.history_pairs[-1]
@@ -1336,24 +1600,24 @@ class GlassOverlay:
                         f"{str(previous.get('source') or '').rstrip()} {source}".strip()
                     )
                     previous["translated"] = translated or ""
+                    if source_language:
+                        previous["source_language"] = source_language
                     previous["time"] = now
                     previous["elapsed"] = now - self.session_started_at
                 else:
-                    self.history_pairs.append(
-                        {
-                            "source": source,
-                            "translated": translated or "",
-                            "time": now,
-                            "elapsed": now - self.session_started_at,
-                        }
-                    )
+                    pair = {
+                        "source": source,
+                        "translated": translated or "",
+                        "time": now,
+                        "elapsed": now - self.session_started_at,
+                    }
+                    if source_language:
+                        pair["source_language"] = source_language
+                    self.history_pairs.append(pair)
                 if len(self.history_pairs) > 5000:
                     self.history_pairs = self.history_pairs[-5000:]
-            if source:
-                self.original_blocks.append({"text": source, "time": now, "gap": speaker_gap})
-                self.original_blocks = self.original_blocks[-16:]
-                self.partial_text = ""
-                self._render_original()
+            if append_source:
+                self._append_source(source, pause_ms, now=now)
             if translated:
                 if replace_translation_tail:
                     self._replace_translation_tail(
@@ -1367,6 +1631,18 @@ class GlassOverlay:
                 self._render_translation()
         except Exception as exc:
             print(f"[ui] _append_pair: {exc!r}", file=sys.stderr)
+
+    def _append_source(self, source, pause_ms=0, now=None):
+        source = str(source or "").strip()
+        if not source:
+            return
+        if now is None:
+            now = time.monotonic()
+        speaker_gap = float(pause_ms or 0.0) >= 1400
+        self.original_blocks.append({"text": source, "time": now, "gap": speaker_gap})
+        self.original_blocks = self.original_blocks[-16:]
+        self.partial_text = ""
+        self._render_original()
 
     def _should_merge_translation_tail(self, previous, incoming, now, speaker_gap, incoming_source=None):
         previous_text = (previous.get("text") or "").strip()
@@ -1394,9 +1670,7 @@ class GlassOverlay:
         if ELLIPSIS_END_RE.search(boundary_text):
             return True
         if SOFT_END_RE.search(boundary_text):
-            if source_aware and starts_like_continuation(incoming_source):
-                return True
-            return False
+            return source_aware and starts_like_continuation(incoming_source)
         if speaker_gap and not source_aware:
             return False
         return source_aware
@@ -1461,7 +1735,7 @@ class GlassOverlay:
 
         font = self.NSFont.systemFontOfSize_weight_(self.font_size, 0.22)
         committed_attrs = {
-            self.NSForegroundColorAttributeName: self.NSColor.whiteColor(),
+            self.NSForegroundColorAttributeName: self._text_color(),
             self.NSFontAttributeName: font,
         }
         attributed = self.NSMutableAttributedString.alloc().initWithString_attributes_(
@@ -1472,7 +1746,7 @@ class GlassOverlay:
         if partial:
             partial_start = len(full_text) - len(partial)
             partial_attrs = {
-                self.NSForegroundColorAttributeName: self.NSColor.whiteColor().colorWithAlphaComponent_(0.32),
+                self.NSForegroundColorAttributeName: self._text_color(0.32),
                 self.NSFontAttributeName: font,
             }
             attributed.addAttributes_range_(
@@ -1488,7 +1762,7 @@ class GlassOverlay:
             full_text = self._waiting_translation()
         font = self.NSFont.systemFontOfSize_weight_(self.font_size, 0.22)
         attrs = {
-            self.NSForegroundColorAttributeName: self.NSColor.whiteColor(),
+            self.NSForegroundColorAttributeName: self._text_color(),
             self.NSFontAttributeName: font,
         }
         attributed = self.NSMutableAttributedString.alloc().initWithString_attributes_(
@@ -1519,7 +1793,7 @@ class GlassOverlay:
             age_from_end = total - idx - 1
             alpha = 1.0 if age_from_end < 3 else max(0.48, 0.82 - age_from_end * 0.06)
             attrs = {
-                self.NSForegroundColorAttributeName: self.NSColor.whiteColor().colorWithAlphaComponent_(alpha),
+                self.NSForegroundColorAttributeName: self._text_color(alpha),
                 self.NSFontAttributeName: font,
             }
             attributed.addAttributes_range_(attrs, self.NSMakeRange(start, length))
@@ -1585,6 +1859,54 @@ def enqueue_translation(translation_q, source_text, pause_ms=0.0, source_languag
     dropped = put_drop_oldest(translation_q, task)
     if dropped:
         print("[translate] очередь перевода забита — пропущена старая задача", file=sys.stderr)
+
+
+def release_mlx_whisper_model(expected_repo=None):
+    """Drop mlx-whisper's cached model and return free MLX cache memory."""
+    try:
+        from mlx_whisper.transcribe import ModelHolder
+    except Exception as exc:  # pragma: no cover - depends on optional runtime package
+        print(f"[whisper] не удалось найти MLX Whisper model cache: {exc}", file=sys.stderr)
+        return False
+
+    current_repo = getattr(ModelHolder, "model_path", None)
+    if expected_repo is not None and current_repo not in (None, expected_repo):
+        return False
+
+    try:
+        ModelHolder.model = None
+        ModelHolder.model_path = None
+        gc.collect()
+        try:
+            import mlx.core as mx
+
+            mx.synchronize()
+            mx.clear_cache()
+        except Exception as exc:  # pragma: no cover - depends on MLX runtime state
+            print(f"[whisper] не удалось очистить MLX cache: {exc}", file=sys.stderr)
+        return True
+    except Exception as exc:  # pragma: no cover - defensive worker cleanup
+        print(f"[whisper] не удалось выгрузить модель: {exc}", file=sys.stderr)
+        return False
+
+
+def post_source_and_enqueue_translation(
+    translation_q,
+    overlay,
+    source_text,
+    pause_ms=0.0,
+    source_language=None,
+):
+    source_text = str(source_text or "").strip()
+    if not source_text:
+        return
+    overlay.post_source(source_text, pause_ms=pause_ms)
+    enqueue_translation(
+        translation_q,
+        source_text,
+        pause_ms=pause_ms,
+        source_language=source_language,
+    )
 
 
 def should_retranslate_merged_source(previous_source, incoming_source, pause_ms=0.0):
@@ -1995,7 +2317,9 @@ def transcribe_translate_worker(
     tail_history = []
     sentence_buffer = ""
     buffer_started_at = None
+    buffer_source_language = None
     recent_context = ""  # last committed/emitted text, fed to Whisper as initial_prompt
+    active_whisper_repo = None
     seen_gen = reset_gen[0] if reset_gen is not None else 0
 
     def maybe_log_slow(label, started_at, extra=""):
@@ -2020,15 +2344,29 @@ def transcribe_translate_worker(
         ]
         return " ".join(value for _, value in tail_history)[-600:]
 
-    def emit_final_blocks(force=False, pause_ms=0.0):
-        nonlocal sentence_buffer, buffer_started_at
+    def emit_final_blocks(
+        force_unfinished=False,
+        include_latest_sentence=False,
+        pause_ms=0.0,
+        source_language=None,
+    ):
+        nonlocal buffer_source_language, sentence_buffer, buffer_started_at
         previous_buffer = sentence_buffer
-        if force:
+        resolved_source_language = source_language or buffer_source_language
+        if force_unfinished:
             blocks, sentence_buffer = take_endpoint_blocks(
                 sentence_buffer,
                 min_chars=min_block_chars,
                 max_chars=max_block_chars,
                 min_words=endpoint_min_words,
+            )
+        elif include_latest_sentence:
+            blocks, sentence_buffer = take_blocks_for_translation(
+                sentence_buffer,
+                min_chars=min_block_chars,
+                max_chars=max_block_chars,
+                max_sentences=max_sentences,
+                force=True,
             )
         else:
             blocks, sentence_buffer = take_confirmed_blocks_for_translation(
@@ -2039,11 +2377,18 @@ def transcribe_translate_worker(
             )
         for source_text in blocks:
             source_text = sentence_case_text(source_text)
-            enqueue_translation(translation_q, source_text, pause_ms=pause_ms)
+            post_source_and_enqueue_translation(
+                translation_q,
+                overlay,
+                source_text,
+                pause_ms=pause_ms,
+                source_language=resolved_source_language,
+            )
             note_context(source_text)
         overlay.post_partial(sentence_case_text(sentence_buffer))
         if not sentence_buffer:
             buffer_started_at = None
+            buffer_source_language = None
         elif blocks or sentence_buffer != previous_buffer or buffer_started_at is None:
             buffer_started_at = time.monotonic()
 
@@ -2056,7 +2401,11 @@ def transcribe_translate_worker(
             tail_history.clear()
             sentence_buffer = ""
             buffer_started_at = None
+            buffer_source_language = None
             recent_context = ""
+            if active_whisper_repo:
+                release_mlx_whisper_model(active_whisper_repo)
+                active_whisper_repo = None
             while True:
                 try:
                     chunk_q.get_nowait()
@@ -2073,7 +2422,7 @@ def transcribe_translate_worker(
             if dropped:
                 last_text = ""
                 if sentence_buffer.strip():
-                    emit_final_blocks(force=True, pause_ms=0.0)
+                    emit_final_blocks(force_unfinished=True, pause_ms=0.0)
                 overlay.post_status(chunk_q.qsize())
                 print(
                     f"[transcribe] очередь чанков полная — сброшено {dropped}, беру свежие; буфер фразы сохранён",
@@ -2097,7 +2446,7 @@ def transcribe_translate_worker(
 
         if audio is None:
             if is_endpoint and sentence_mode:
-                emit_final_blocks(force=True, pause_ms=trailing_silence_ms)
+                emit_final_blocks(include_latest_sentence=True, pause_ms=trailing_silence_ms)
             continue
 
         temp_path = None
@@ -2113,11 +2462,14 @@ def transcribe_translate_worker(
             # into never punctuating (see punctuated_context).
             context_prompt = punctuated_context(f"{recent_context} {sentence_buffer}")
             whisper_size = settings.get_whisper_size()
+            whisper_repo = WHISPER_MODELS[whisper_size]
+            if active_whisper_repo and active_whisper_repo != whisper_repo:
+                release_mlx_whisper_model(active_whisper_repo)
             gen_at_start = reset_gen[0] if reset_gen is not None else seen_gen
             transcribe_started = time.monotonic()
             result = mlx_whisper.transcribe(
                 temp_path,
-                path_or_hf_repo=WHISPER_MODELS[whisper_size],
+                path_or_hf_repo=whisper_repo,
                 language=None if source_language == "auto" else source_language,
                 condition_on_previous_text=False,
                 initial_prompt=context_prompt,
@@ -2127,6 +2479,13 @@ def transcribe_translate_worker(
                 temperature=(0.0, 0.2, 0.4),
                 word_timestamps=word_timestamps,
                 verbose=False,
+            )
+            active_whisper_repo = whisper_repo
+            detected_source_language = str(result.get("language") or "").strip()
+            resolved_source_language = (
+                detected_source_language
+                if source_language == "auto" and detected_source_language
+                else source_language
             )
             maybe_log_slow("whisper", transcribe_started, f"size={whisper_size}")
             if reset_gen is not None and reset_gen[0] != gen_at_start:
@@ -2157,18 +2516,39 @@ def transcribe_translate_worker(
 
             if sentence_mode:
                 sentence_buffer = merge_partial_buffer(sentence_buffer, text)
+                if (
+                    source_language == "auto"
+                    and resolved_source_language
+                    and resolved_source_language != "auto"
+                    and buffer_source_language is None
+                ):
+                    buffer_source_language = resolved_source_language
                 if sentence_buffer and buffer_started_at is None:
                     buffer_started_at = now
                 overlay.post_partial(sentence_case_text(sentence_buffer))
                 buffer_age = (now - buffer_started_at) if buffer_started_at else 0.0
                 stable_timeout = max_partial_seconds > 0 and buffer_age >= max_partial_seconds
                 too_long = len(sentence_buffer) >= max_block_chars
-                if is_endpoint or stable_timeout or too_long:
-                    emit_final_blocks(force=True, pause_ms=trailing_silence_ms)
+                if stable_timeout or too_long:
+                    emit_final_blocks(
+                        force_unfinished=True,
+                        pause_ms=trailing_silence_ms,
+                        source_language=resolved_source_language,
+                    )
+                elif is_endpoint:
+                    emit_final_blocks(
+                        include_latest_sentence=True,
+                        pause_ms=trailing_silence_ms,
+                        source_language=resolved_source_language,
+                    )
                 else:
-                    emit_final_blocks(force=False)
+                    emit_final_blocks(source_language=resolved_source_language)
             else:
-                enqueue_translation(translation_q, sentence_case_text(text))
+                enqueue_translation(
+                    translation_q,
+                    sentence_case_text(text),
+                    source_language=resolved_source_language,
+                )
                 note_context(text)
         except Exception as exc:
             overlay.post_pair("", f"Ошибка: {exc}")
@@ -2258,6 +2638,8 @@ def translation_worker(translation_q, overlay, translator, stop_event, settings,
                     pause_ms=pause_ms,
                     replace_translation_tail=should_replace_tail,
                     combined_source=combined_source,
+                    append_source=False,
+                    source_language=task_source_language or source_language,
                 )
                 last_source = combined_source
         except Exception as exc:
@@ -2292,6 +2674,7 @@ def streaming_worker(
     committed_text = ""   # confirmed words not yet emitted as a full sentence
     recent_context = ""   # fed to Whisper as initial_prompt
     detected_lang = "auto"  # Whisper's detected source language (for TranslateGemma)
+    active_whisper_repo = None
     pending_seconds = 0.0
     trailing_silence_ms = 0.0
     endpoint_sent = False
@@ -2307,13 +2690,16 @@ def streaming_worker(
             recent_context = f"{recent_context} {text}".strip()[-240:]
 
     def transcribe_words(audio):
-        nonlocal detected_lang
+        nonlocal active_whisper_repo, detected_lang
         source_language, _ = settings.get()
+        whisper_repo = WHISPER_MODELS[settings.get_whisper_size()]
+        if active_whisper_repo and active_whisper_repo != whisper_repo:
+            release_mlx_whisper_model(active_whisper_repo)
         sf.write(temp_path, audio, int(samplerate), subtype="PCM_16")
         context = punctuated_context(f"{recent_context} {committed_text}")
         result = mlx_whisper.transcribe(
             temp_path,
-            path_or_hf_repo=WHISPER_MODELS[settings.get_whisper_size()],
+            path_or_hf_repo=whisper_repo,
             language=None if source_language == "auto" else source_language,
             condition_on_previous_text=False,
             initial_prompt=context,
@@ -2324,6 +2710,7 @@ def streaming_worker(
             word_timestamps=True,
             verbose=False,
         )
+        active_whisper_repo = whisper_repo
         detected_lang = result.get("language") or detected_lang
         words = []
         for seg in result.get("segments", []):
@@ -2351,8 +2738,12 @@ def streaming_worker(
             # Hand the block to the translation worker instead of blocking this audio-reader
             # thread on Ollama; otherwise translation latency stalls transcription and the
             # audio queue overflows.
-            enqueue_translation(
-                translation_q, src, pause_ms=pause_ms, source_language=resolved_source
+            post_source_and_enqueue_translation(
+                translation_q,
+                overlay,
+                src,
+                pause_ms=pause_ms,
+                source_language=resolved_source,
             )
             note_context(src)
 
@@ -2362,6 +2753,9 @@ def streaming_worker(
             proc.reset()
             committed_text = ""
             recent_context = ""
+            if active_whisper_repo:
+                release_mlx_whisper_model(active_whisper_repo)
+                active_whisper_repo = None
             pending_seconds = 0.0
             trailing_silence_ms = 0.0
             endpoint_sent = False
@@ -2498,7 +2892,7 @@ def streaming_worker(
 
 
 def build_translator(args):
-    return OllamaTranslator(
+    translator = OllamaTranslator(
         model=args.ollama_model,
         target=args.target,
         url=args.ollama_url,
@@ -2506,7 +2900,10 @@ def build_translator(args):
         temperature=args.temperature,
         reasoning=args.reasoning,
         source=args.source,
+        num_ctx=args.ollama_num_ctx,
     )
+    translator.unload_models_except(GEMMA_MODELS.keys(), args.ollama_model)
+    return translator
 
 
 def parse_args():
@@ -2520,8 +2917,8 @@ def parse_args():
     p.add_argument(
         "--whisper",
         choices=WHISPER_MODELS.keys(),
-        default="medium",
-        help="MLX Whisper размер: small/medium/large",
+        default="turbo",
+        help="MLX Whisper размер: small/medium/turbo/large",
     )
     p.add_argument(
         "--translator",
@@ -2532,7 +2929,7 @@ def parse_args():
     p.add_argument(
         "--ollama-model",
         choices=GEMMA_MODELS.keys(),
-        default="gemma4:12b-mlx",
+        default="gemma4:26b-mlx",
         help="модель Ollama Gemma 4",
     )
     p.add_argument("--ollama-url", default="http://127.0.0.1:11434", help="адрес Ollama")
@@ -2560,8 +2957,8 @@ def parse_args():
     p.add_argument(
         "--endpoint-min-words",
         type=int,
-        default=8,
-        help="минимум слов для перевода на endpoint даже без пунктуации",
+        default=24,
+        help="аварийный минимум слов для forced flush без пунктуации",
     )
     p.add_argument(
         "--max-partial-seconds",
@@ -2655,6 +3052,12 @@ def parse_args():
         help="как часто (с накопленного аудио) пере-распознавать буфер в LocalAgreement-режиме",
     )
     p.add_argument("--max-tokens", type=int, default=180, help="лимит токенов перевода")
+    p.add_argument(
+        "--ollama-num-ctx",
+        type=int,
+        default=4096,
+        help="контекст Ollama для live translation; 0 = оставить дефолт сервера",
+    )
     p.add_argument("--temperature", type=float, default=0.1, help="температура LLM")
     p.add_argument(
         "--reasoning",
@@ -2663,7 +3066,7 @@ def parse_args():
     )
     p.add_argument("--width", type=int, default=1100, help="ширина окна")
     p.add_argument("--height", type=int, default=520, help="высота окна")
-    p.add_argument("--opacity", type=float, default=0.92, help="прозрачность окна")
+    p.add_argument("--opacity", type=float, default=1.0, help=argparse.SUPPRESS)
     p.add_argument(
         "--show-partial",
         action="store_true",
@@ -2727,7 +3130,6 @@ def main():
         )
     )
     overlay.reset_gen = reset_gen
-    overlay.translator = translator  # lets the model menu unload the old model immediately
 
     workers = [
         threading.Thread(

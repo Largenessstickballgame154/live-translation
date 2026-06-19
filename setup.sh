@@ -28,10 +28,13 @@ else
     echo "    ollama не найден — пропускаю Gemma models"
 fi
 
-echo "==> 4/4  Pre-fetch default speech model (Whisper medium MLX)"
+echo "==> 4/4  Pre-fetch speech models (Whisper medium + turbo MLX)"
 ./.venv/bin/python - <<'PY' || echo "    модели докачаются при первом запуске"
 from huggingface_hub import snapshot_download
-for repo in ("mlx-community/whisper-medium-mlx",):
+for repo in (
+    "mlx-community/whisper-medium-mlx",
+    "mlx-community/whisper-large-v3-turbo",
+):
     print("    fetching", repo)
     snapshot_download(repo)
 PY

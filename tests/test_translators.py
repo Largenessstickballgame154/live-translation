@@ -45,6 +45,7 @@ def test_ollama_qwen_uses_chat_api_and_disables_thinking(monkeypatch):
         "num_predict": 220,
         "top_p": 0.8,
         "top_k": 20,
+        "num_ctx": 4096,
     }
     messages = captured["payload"]["messages"]
     assert messages[0]["role"] == "system"
@@ -97,3 +98,86 @@ def test_ollama_translate_accepts_per_call_token_override(monkeypatch):
 
     assert translator.translate("hola", max_tokens=640) == "готово"
     assert captured["payload"]["options"]["num_predict"] == 640
+    assert captured["payload"]["options"]["num_ctx"] == 4096
+
+
+def test_ollama_translate_can_leave_context_to_server_default(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({"message": {"content": "готово"}})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    translator = OllamaTranslator(
+        model="gemma4:26b-mlx",
+        target="ru",
+        url="http://127.0.0.1:11434",
+        max_tokens=180,
+        temperature=0.1,
+        reasoning=False,
+        source="es",
+        num_ctx=0,
+    )
+
+    assert translator.translate("hola") == "готово"
+    assert "num_ctx" not in captured["payload"]["options"]
+
+
+def test_ollama_unload_uses_empty_generate_request(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["payload"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse({"done": True, "done_reason": "unload"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    translator = OllamaTranslator(
+        model="gemma4:26b-mlx",
+        target="ru",
+        url="http://127.0.0.1:11434",
+        max_tokens=180,
+        temperature=0.1,
+        reasoning=False,
+        source="es",
+    )
+
+    translator._unload("gemma4:12b-mlx")
+
+    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
+    assert captured["timeout"] == 10
+    assert captured["payload"] == {
+        "model": "gemma4:12b-mlx",
+        "prompt": "",
+        "stream": False,
+        "keep_alive": 0,
+    }
+
+
+def test_ollama_unloads_known_models_except_selected(monkeypatch):
+    unloaded = []
+
+    def fake_urlopen(req, timeout):
+        payload = json.loads(req.data.decode("utf-8"))
+        unloaded.append(payload["model"])
+        return FakeResponse({"done": True, "done_reason": "unload"})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    translator = OllamaTranslator(
+        model="gemma4:12b-mlx",
+        target="ru",
+        url="http://127.0.0.1:11434",
+        max_tokens=180,
+        temperature=0.1,
+        reasoning=False,
+        source="es",
+    )
+
+    translator.unload_models_except(
+        ["gemma4:26b-mlx", "gemma4:e4b-mlx", "gemma4:12b-mlx"],
+        "gemma4:12b-mlx",
+    )
+
+    assert unloaded == ["gemma4:26b-mlx", "gemma4:e4b-mlx"]

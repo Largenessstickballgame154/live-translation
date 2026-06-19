@@ -16,7 +16,7 @@ It's a hack. It works surprisingly well. Read on.
 
 ```
 system audio ──► whisper (speech→text) ──► local LLM (translate) ──► glass overlay
-   (BlackHole)        (mlx, small/medium/large) (Ollama Gemma 4)        (pyobjc)
+   (BlackHole)     (mlx, small/medium/turbo/large) (Ollama Gemma 4)     (pyobjc)
 ```
 
 Everything is local: [MLX](https://github.com/ml-explore/mlx) Whisper for transcription, Ollama Gemma 4 for translation, Silero VAD to throw away silence. The UI is a translucent always-on-top window drawn with pyobjc.
@@ -83,7 +83,7 @@ Now you hear everything normally, and the app hears it too. (If you don't care a
 
 Models get downloaded the first time (or up front by `setup.sh`):
 
-- **Whisper medium** (transcription) — MLX, pulled automatically from Hugging Face on first run. No API keys, no accounts.
+- **Whisper medium + turbo** (transcription) — MLX, pulled automatically from Hugging Face on first run. No API keys, no accounts.
 - **Gemma 4 via Ollama** (translation) — choose `gemma4:26b-mlx`, `gemma4:e4b-mlx`, or `gemma4:12b-mlx` from the in-app settings.
 - **Silero VAD** ships inside the `silero-vad` pip package — nothing to download.
 
@@ -91,7 +91,7 @@ To grab them ahead of time instead of on first launch:
 
 ```bash
 ./.venv/bin/python -c "from huggingface_hub import snapshot_download; \
-[snapshot_download(r) for r in ('mlx-community/whisper-medium-mlx',)]"
+[snapshot_download(r) for r in ('mlx-community/whisper-medium-mlx', 'mlx-community/whisper-large-v3-turbo')]"
 ```
 
 For translation models:
@@ -112,11 +112,11 @@ Two ways — pick whichever you like, they open the exact same overlay.
 ./.venv/bin/python live_translate_overlay.py --target ru
 ```
 
-(Call the venv's python directly so you know you're using the environment from `./setup.sh`.) This is also where you tweak anything: pass `--source es`, `--whisper medium`, etc. to make it behave *identically to the app's launcher*, add the flags the bundle uses by default:
+(Call the venv's python directly so you know you're using the environment from `./setup.sh`.) This is also where you tweak anything: pass `--source es`, `--whisper turbo`, etc. to make it behave *identically to the app's launcher*, add the flags the bundle uses by default:
 
 ```bash
 ./.venv/bin/python live_translate_overlay.py \
-    --legacy-chunking --whisper medium --ollama-model gemma4:26b-mlx --target ru
+    --legacy-chunking --whisper turbo --ollama-model gemma4:26b-mlx --target ru
 ```
 
 See [knobs](#knobs) below or `--help` for the full list.
@@ -145,10 +145,10 @@ The window is two columns — original on the left, translation on the right —
 - **Source / Target** — the language you're listening to and the one you want it in. Leave Source on *Auto* and Whisper figures it out per sentence (pin it if the audio mixes languages and the detector wobbles).
 - **Compact** — hide the original, show only the translation (one wide column) when you just want the gist.
 - **Pin** — keep the window floating above everything (on by default). Turn off if you want it to behave like a normal window.
-- **Opacity** slider + **A- / A+** — how see-through the glass is, and the font size. Read it over a bright video or shrink it out of the way.
-- **lag: N** — how many audio chunks are waiting. Zero-ish = keeping up live; if it climbs and stays up, your machine isn't keeping pace (try `--whisper medium`).
+- **A- / A+** — font size. Read it over a bright video or shrink it out of the way.
+- **lag: N** — how many audio chunks are waiting. Zero-ish = keeping up live; if it climbs and stays up, your machine isn't keeping pace (try `--whisper small`).
 - 🗑 **(trash)** — wipe everything and start clean: both columns, the history, and all the model state behind them.
-- **PDF** — dump the whole session (every original + translation pair, not just what's on screen) to a PDF.
+- **PDF / TXT** — dump the whole session (every original + translation pair, not just what's on screen).
 
 The window itself is draggable (grab anywhere) and resizable from the edges; controls on the right tuck away if you make it narrow.
 
@@ -168,13 +168,15 @@ The naive version of this — chop audio into fixed 5s chunks, transcribe each o
 
 - **Translation by a real LLM, not word-by-word MT.** The LLM gets whole sentences and the recently-translated context, so it produces coherent sentences instead of word salad. Translation runs in the same worker thread that loaded the model — sounds obvious, but MLX uses a thread-local GPU stream, so loading on one thread and generating on another silently explodes on long prompts. Lazy-load on first use fixed it.
 
-- The overlay is just an `NSTextView` in a translucent floating window. Resizable, pinnable, opacity slider, font size, save-to-PDF, clear button. Nothing fancy.
+- The overlay is just an `NSTextView` in a floating window. Resizable, pinnable, font size, save-to-PDF/TXT, clear button. Nothing fancy.
 
 ## The models
 
-**Transcription: Whisper on MLX.** Pick `small`, `medium`, or `large` in settings. `medium` is the current default because it gives the live pipeline more headroom on a laptop while staying much stronger than the tiny models. And **[MLX](https://github.com/ml-explore/mlx) because it's the fastest way to run Whisper on a Mac** — it's Apple's own array framework, runs on the GPU through Metal with unified memory (no copying audio tensors back and forth), and on Apple silicon it beats the CPU-bound options (faster-whisper, whisper.cpp) for this workload.
+**Transcription: Whisper on MLX.** Pick `small`, `medium`, `turbo`, or `large` in settings. `turbo` is the current default because it is the faster large-v3 variant and gives the live pipeline more headroom while staying much stronger than the tiny models; use `large` when accuracy matters more than latency. And **[MLX](https://github.com/ml-explore/mlx) because it's the fastest way to run Whisper on a Mac** — it's Apple's own array framework, runs on the GPU through Metal with unified memory (no copying audio tensors back and forth), and on Apple silicon it beats the CPU-bound options (faster-whisper, whisper.cpp) for this workload.
 
 **Translation** uses **Gemma 4 via Ollama**. The app exposes three choices in settings: `gemma4:26b-mlx`, `gemma4:e4b-mlx`, and `gemma4:12b-mlx`.
+
+For the best overall quality, use `--whisper turbo` with `--ollama-model gemma4:26b-mlx`.
 
 ## Knobs
 
@@ -183,7 +185,7 @@ It's a CLI under the hood, so everything is tunable. Some you'll actually touch:
 ```
 --legacy-chunking          the lossless chunk pipeline (DEFAULT in the .app launcher)
 --source / --target        languages (or pick in the UI). source=auto detects per-utterance
---whisper medium           MLX Whisper size: small, medium, or large
+--whisper turbo            MLX Whisper size: small, medium, turbo, or large
 --ollama-model MODEL       Gemma 4 Ollama model
 --silence-rms 0.006        louder = stricter silence gate
 --vad-min-speech-ms 250    min real speech per window before whisper sees it
@@ -211,7 +213,7 @@ None of this is clever. All of it was necessary.
 
 - macOS + Apple silicon only. The overlay is pyobjc/Cocoa, the inference is MLX.
 - You have to route audio through BlackHole yourself. macOS makes capturing system audio annoying on purpose.
-- Whisper is not free. The default medium chunker keeps up on an M-series Mac; if it ever can't, it stays correct for a while, then skips stale raw audio rather than letting the subtitles drift forever. Use `--whisper large` when accuracy matters more than headroom. The streaming mode is heavier still.
+- Whisper is not free. The default turbo chunker keeps up on an M-series Mac; if it ever can't, it stays correct for a while, then skips stale raw audio rather than letting the subtitles drift forever. Use `--whisper small` when latency matters even more, or `--whisper large` when accuracy matters more than headroom. The streaming mode is heavier still.
 - Auto language detection wobbles on mixed-language audio (Spanish news with Catalan inserts will flip-flop). Pin `--source` if you know it.
 - It still hallucinates sometimes. It's Whisper. We mitigate, we don't cure.
 - The Cocoa overlay and audio workers are still intentionally compact, but the text pipeline and translation backends are split out and covered by tests.
